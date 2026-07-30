@@ -291,18 +291,6 @@ if arquivo_upload is not None:
             f"estão destacados em **vermelho** nas colunas **Ticker** e **DY 12m (%)** ao final da tabela.*"
         )
 
-        # Função de estilo pontual (destaca apenas as células Ticker e DY 12m (%))
-        def aplicar_estilo_pontual(df_dados):
-            estilos = pd.DataFrame("", index=df_dados.index, columns=df_dados.columns)
-            css_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
-            
-            for idx, row in df_dados.iterrows():
-                if row["E_Vermelho"]:
-                    estilos.loc[idx, "Ticker"] = css_vermelho
-                    estilos.loc[idx, "DY 12m (%)"] = css_vermelho
-
-            return estilos
-
         # Seleção de colunas para exibição na tela
         colunas_exibicao = [
             "Ticker", 
@@ -318,10 +306,26 @@ if arquivo_upload is not None:
             "Soma Acumulada (R$)"
         ]
 
+        df_tabela = df_final[colunas_exibicao].copy()
+
+        # Função de estilo corrigida (cria a matriz com as mesmas colunas de df_tabela)
+        def aplicar_estilo_pontual(data_frame_exibicao):
+            estilos = pd.DataFrame("", index=data_frame_exibicao.index, columns=data_frame_exibicao.columns)
+            css_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
+            
+            for idx, row in df_final.iterrows():
+                if row["E_Vermelho"]:
+                    if "Ticker" in estilos.columns:
+                        estilos.loc[idx, "Ticker"] = css_vermelho
+                    if "DY 12m (%)" in estilos.columns:
+                        estilos.loc[idx, "DY 12m (%)"] = css_vermelho
+
+            return estilos
+
         df_estilizado = (
-            df_final[colunas_exibicao]
+            df_tabela
             .style
-            .apply(lambda _: aplicar_estilo_pontual(df_final), axis=None)
+            .apply(lambda _: aplicar_estilo_pontual(df_tabela), axis=None)
             .format({
                 "Quantidade": "{:,.0f}",
                 "Preço Médio (R$)": "R$ {:,.2f}",
