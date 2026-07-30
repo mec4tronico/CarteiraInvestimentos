@@ -96,7 +96,10 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
                 'ticker': ticker,
                 'quantidade': 0.0,
                 'custo_total': 0.0,
-                'primeira_compra': data_op,
+                # A data só é definida quando uma posição é efetivamente aberta.
+                # Isso evita que eventos anteriores (ou uma posição já encerrada)
+                # contaminem a data de aquisição do lote atual.
+                'primeira_compra': None,
             }
 
         # Identifica se é Entrada/Compra com valor financeiro
@@ -111,13 +114,18 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
             posicoes[ticker]['quantidade'] += qtd
             posicoes[ticker]['custo_total'] += valor_op
 
-            if posicoes[ticker]['primeira_compra'] is None or (pd.notnull(data_op) and data_op < posicoes[ticker]['primeira_compra']):
+            if posicoes[ticker]['primeira_compra'] is None:
                 posicoes[ticker]['primeira_compra'] = data_op
 
         elif is_venda and posicoes[ticker]['quantidade'] > 0:
             pm = posicoes[ticker]['custo_total'] / posicoes[ticker]['quantidade']
             posicoes[ticker]['quantidade'] = max(0.0, posicoes[ticker]['quantidade'] - qtd)
             posicoes[ticker]['custo_total'] = posicoes[ticker]['quantidade'] * pm
+
+            # Uma venda/transferência de liquidação que zera a posição encerra o lote.
+            # A próxima entrada passa a ter sua própria data de aquisição.
+            if posicoes[ticker]['quantidade'] == 0:
+                posicoes[ticker]['primeira_compra'] = None
 
     # ==============================================================================
     # AUDITORIA DE SALDO: TOLERÂNCIA DE QUANTIDADE > 5
@@ -177,6 +185,43 @@ def buscar_dados_yfinance(ticker_b3: str) -> dict:
         "preco_atual": preco_atual,
         "dy": dy if dy is not None else 0.0
     }
+
+
+@st.cache_data(ttl=1800)
+def buscar_fechamentos_14_pregoes(tickers_b3: tuple) -> dict:
+    """Obtém os últimos 14 fechamentos para os ativos selecionados."""
+    if not tickers_b3:
+        return {}
+
+    simbolos = [f"{ticker}.SA" if not ticker.endswith(".SA") else ticker for ticker in tickers_b3]
+
+    try:
+        historico = yf.download(
+            simbolos,
+            period="1mo",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+    except Exception:
+        return {}
+
+    if historico.empty or "Close" not in historico:
+        return {}
+
+    fechamentos = historico["Close"]
+    if isinstance(fechamentos, pd.Series):
+        fechamentos = fechamentos.to_frame(name=simbolos[0])
+
+    resultado = {}
+    for ticker, simbolo in zip(tickers_b3, simbolos):
+        if simbolo in fechamentos.columns:
+            serie = fechamentos[simbolo].dropna().tail(14)
+            if not serie.empty:
+                resultado[ticker] = serie
+
+    return resultado
 
 
 # INTERFACE DO STREAMLIT
@@ -273,30 +318,58 @@ if arquivo_upload is not None:
 
             st.markdown("---")
 
-            # GRÁFICOS
-            g1, g2 = st.columns(2)
+            # GRÁFICO DE RESULTADO POR ATIVO
+            fig_bar = px.bar(
+                df_final.sort_values(by="Lucro/Prejuízo (R$)", ascending=True),
+                x="Lucro/Prejuízo (R$)",
+                y="Ticker",
+                orientation="h",
+                title="<b>Lucro / Prejuízo Acumulado por Ativo (R$)</b>",
+                color="Lucro/Prejuízo (R$)",
+                color_continuous_scale="RdYlGn"
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
 
-            with g1:
-                fig_pie = px.pie(
-                    df_final, 
-                    values="Valor Atualizado (R$)", 
-                    names="Ticker", 
-                    title="<b>Alocação por Ativo</b>",
-                    hole=0.4
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
+            # TENDÊNCIA DOS PRINCIPAIS ATIVOS
+            st.subheader("Tendência dos 8 Ativos de Maior Valor — Últimos 14 Pregões")
+            principais_ativos = (
+                df_final
+                .nlargest(8, "Valor Atualizado (R$)")["Ticker"]
+                .tolist()
+            )
+            historicos = buscar_fechamentos_14_pregoes(tuple(principais_ativos))
+            grade_graficos = st.columns(2)
 
-            with g2:
-                fig_bar = px.bar(
-                    df_final.sort_values(by="Lucro/Prejuízo (R$)", ascending=True), 
-                    x="Lucro/Prejuízo (R$)", 
-                    y="Ticker", 
-                    orientation="h",
-                    title="<b>Lucro / Prejuízo Acumulado por Ativo (R$)</b>",
-                    color="Lucro/Prejuízo (R$)",
-                    color_continuous_scale="RdYlGn"
-                )
-                st.plotly_chart(fig_bar, use_container_width=True)
+            for indice, ticker in enumerate(principais_ativos):
+                with grade_graficos[indice % 2]:
+                    fechamento = historicos.get(ticker)
+                    if fechamento is None or len(fechamento) < 2:
+                        st.warning(f"Histórico insuficiente para {ticker}.")
+                        continue
+
+                    variacao = ((fechamento.iloc[-1] / fechamento.iloc[0]) - 1) * 100
+                    df_grafico = fechamento.rename("Fechamento (R$)").reset_index()
+                    df_grafico.columns = ["Data", "Fechamento (R$)"]
+
+                    fig_tendencia = px.line(
+                        df_grafico,
+                        x="Data",
+                        y="Fechamento (R$)",
+                        title=f"<b>{ticker}</b> · {variacao:+.2f}%",
+                    )
+                    fig_tendencia.update_traces(line=dict(color="#2563EB", width=2))
+                    fig_tendencia.update_layout(
+                        height=260,
+                        margin=dict(l=10, r=10, t=45, b=10),
+                        xaxis_title=None,
+                        yaxis_title="Preço (R$)",
+                        showlegend=False,
+                    )
+                    st.plotly_chart(
+                        fig_tendencia,
+                        use_container_width=True,
+                        key=f"tendencia-{ticker}",
+                    )
 
             # TABELA DETALHADA COM REORDENAÇÃO PERSONALIZADA
             st.subheader("📋 Tabela Detalhada de Posições (Ordenada por DY Decrescente)")
