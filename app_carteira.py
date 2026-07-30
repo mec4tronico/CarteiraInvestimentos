@@ -47,6 +47,14 @@ def limpar_valor_numerico(val):
         return 0.0
 
 
+def classificar_tipo_ativo(produto) -> str:
+    """Classifica FIIs pela descrição oficial da B3; os demais são ações."""
+    descricao = str(produto).upper()
+    if "FII" in descricao or "FUNDO DE INVESTIMENTO IMOBILI" in descricao:
+        return "FII"
+    return "Ação"
+
+
 @st.cache_data(ttl=1800)
 def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
     """Processa o Extrato de Movimentações da B3, auditando e aplicando a
@@ -100,6 +108,7 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
                 # Isso evita que eventos anteriores (ou uma posição já encerrada)
                 # contaminem a data de aquisição do lote atual.
                 'primeira_compra': None,
+                'tipo_ativo': classificar_tipo_ativo(row['Produto']),
             }
 
         # Identifica se é Entrada/Compra com valor financeiro
@@ -140,7 +149,8 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
                 'quantidade': p['quantidade'],
                 'preco_medio': pm,
                 'custo_total': p['custo_total'],
-                'data_aquisicao': data_exibicao
+                'data_aquisicao': data_exibicao,
+                'tipo_ativo': p['tipo_ativo'],
             })
 
     return pd.DataFrame(resumo)
@@ -224,6 +234,110 @@ def buscar_fechamentos_14_pregoes(tickers_b3: tuple) -> dict:
     return resultado
 
 
+def exibir_painel_categoria(df_painel: pd.DataFrame, titulo: str, teto_vermelho: float):
+    """Exibe métricas, gráficos e tabela de uma categoria de ativos."""
+    if df_painel.empty:
+        st.info(f"Não há ativos classificados como {titulo.lower()}.")
+        return
+
+    df_painel = df_painel.sort_values(by="DY 12m (%)", ascending=False).reset_index(drop=True)
+    patrimonio = df_painel["Valor Atualizado (R$)"].sum()
+    custo_total = df_painel["Custo Total Investido (R$)"].sum()
+    lucro_total = patrimonio - custo_total
+    rentabilidade = ((patrimonio / custo_total) - 1) * 100 if custo_total > 0 else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Patrimônio Atual", f"R$ {patrimonio:,.2f}")
+    c2.metric("Custo Total Investido", f"R$ {custo_total:,.2f}")
+    c3.metric("Lucro / Prejuízo Total", f"R$ {lucro_total:,.2f}", delta=f"{lucro_total:,.2f}")
+    c4.metric("Rentabilidade", f"{rentabilidade:+.2f}%")
+
+    fig_bar = px.bar(
+        df_painel.sort_values(by="Lucro/Prejuízo (R$)", ascending=True),
+        x="Lucro/Prejuízo (R$)",
+        y="Ticker",
+        orientation="h",
+        title=f"<b>Lucro / Prejuízo Acumulado — {titulo}</b>",
+        color="Lucro/Prejuízo (R$)",
+        color_continuous_scale="RdYlGn"
+    )
+    st.plotly_chart(fig_bar, use_container_width=True, key=f"resultado-{titulo}")
+
+    st.subheader(f"Tendência dos Principais {titulo} — Últimos 14 Pregões")
+    principais_ativos = df_painel.nlargest(8, "Valor Atualizado (R$)")["Ticker"].tolist()
+    historicos = buscar_fechamentos_14_pregoes(tuple(principais_ativos))
+    grade_graficos = st.columns(2)
+
+    for indice, ticker in enumerate(principais_ativos):
+        with grade_graficos[indice % 2]:
+            fechamento = historicos.get(ticker)
+            if fechamento is None or len(fechamento) < 2:
+                st.warning(f"Histórico insuficiente para {ticker}.")
+                continue
+
+            variacao = ((fechamento.iloc[-1] / fechamento.iloc[0]) - 1) * 100
+            df_grafico = fechamento.rename("Fechamento (R$)").reset_index()
+            df_grafico.columns = ["Data", "Fechamento (R$)"]
+            fig_tendencia = px.line(
+                df_grafico,
+                x="Data",
+                y="Fechamento (R$)",
+                title=f"<b>{ticker}</b> · {variacao:+.2f}%",
+            )
+            fig_tendencia.update_traces(line=dict(color="#2563EB", width=2))
+            fig_tendencia.update_layout(
+                height=260,
+                margin=dict(l=10, r=10, t=45, b=10),
+                xaxis_title=None,
+                yaxis_title="Preço (R$)",
+                showlegend=False,
+            )
+            st.plotly_chart(
+                fig_tendencia,
+                use_container_width=True,
+                key=f"tendencia-{titulo}-{ticker}",
+            )
+
+    st.subheader(f"Tabela Detalhada de {titulo} (Ordenada por DY Decrescente)")
+    st.markdown(
+        f"*Os ativos selecionados pelos piores DYs até o teto de **R$ {teto_vermelho:,.2f}** "
+        "estão destacados em **vermelho** nas colunas **Ticker** e **DY 12m (%)**.*"
+    )
+
+    colunas_exibicao = [
+        "Ticker", "DY 12m (%)", "Valor Atualizado (R$)", "Lucro/Prejuízo (R$)",
+        "Rentabilidade (%)", "Data 1ª Aquisição", "Quantidade", "Preço Médio (R$)",
+        "Preço Atual (R$)", "Custo Total Investido (R$)", "Soma Acumulada (R$)"
+    ]
+    df_tabela = df_painel[colunas_exibicao].copy()
+
+    def aplicar_estilo_pontual(data_frame_exibicao):
+        estilos = pd.DataFrame("", index=data_frame_exibicao.index, columns=data_frame_exibicao.columns)
+        css_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
+        for idx, row in df_painel.iterrows():
+            if row["E_Vermelho"]:
+                estilos.loc[idx, "Ticker"] = css_vermelho
+                estilos.loc[idx, "DY 12m (%)"] = css_vermelho
+        return estilos
+
+    df_estilizado = (
+        df_tabela.style
+        .apply(lambda _: aplicar_estilo_pontual(df_tabela), axis=None)
+        .format({
+            "DY 12m (%)": "{:.2f}%",
+            "Valor Atualizado (R$)": "R$ {:,.2f}",
+            "Lucro/Prejuízo (R$)": "R$ {:,.2f}",
+            "Rentabilidade (%)": "{:+.2f}%",
+            "Quantidade": "{:,.0f}",
+            "Preço Médio (R$)": "R$ {:,.2f}",
+            "Preço Atual (R$)": "R$ {:,.2f}",
+            "Custo Total Investido (R$)": "R$ {:,.2f}",
+            "Soma Acumulada (R$)": "R$ {:,.2f}"
+        }, na_rep="-")
+    )
+    st.dataframe(df_estilizado, use_container_width=True, height=500)
+
+
 # INTERFACE DO STREAMLIT
 st.title("📊 Dashboard da Carteira B3")
 st.markdown("Análise consolidada do Extrato Oficial de Movimentações da B3.")
@@ -231,11 +345,19 @@ st.markdown("Análise consolidada do Extrato Oficial de Movimentações da B3.")
 st.sidebar.header("📂 Importação de Dados")
 arquivo_upload = st.sidebar.file_uploader("Envie a planilha `.xlsx` da B3", type=["xlsx"])
 
-# Configuração da Entrada do APTO na Sidebar
-st.sidebar.header("🏠 Entrada do APTO")
-valor_entrada = st.sidebar.number_input(
-    "Valor da Entrada (R$):",
-    value=85000.0,
+# Configuração dos tetos de destaque na Sidebar
+st.sidebar.header("🔴 Tetos para Destaque em Vermelho")
+teto_vermelho_acoes = st.sidebar.number_input(
+    "Teto para Ações (R$):",
+    value=57000.0,
+    min_value=0.0,
+    step=1000.0,
+    format="%.2f"
+)
+teto_vermelho_fiis = st.sidebar.number_input(
+    "Teto para FIIs (R$):",
+    value=28000.0,
+    min_value=0.0,
     step=1000.0,
     format="%.2f"
 )
@@ -274,6 +396,7 @@ if arquivo_upload is not None:
 
             dados_completos.append({
                 "Ticker": ticker,
+                "Tipo": row["tipo_ativo"],
                 "DY 12m (%)": dados.get("dy", 0.0),
                 "Valor Atualizado (R$)": val_atualizado,
                 "Lucro/Prejuízo (R$)": lucro_prejuizo,
@@ -293,143 +416,82 @@ if arquivo_upload is not None:
         if df_base.empty:
             st.warning("Todos os ativos identificados possuem valor atual zerado.")
         else:
-            # SELEÇÃO: Ordena por DY CRESCENTE -> Soma acumulada até o teto
-            df_crescente = df_base.sort_values(by="DY 12m (%)", ascending=True).reset_index(drop=True)
-            
-            df_crescente["Soma Acumulada (R$)"] = df_crescente["Valor Atualizado (R$)"].cumsum()
-            df_crescente["Soma Acumulada Anterior"] = df_crescente["Soma Acumulada (R$)"].shift(1, fill_value=0.0)
-
-            df_crescente["E_Vermelho"] = df_crescente["Soma Acumulada Anterior"] < valor_entrada
+            # SELEÇÃO: piores DYs acumulados separadamente para ações e FIIs.
+            df_crescente = df_base.sort_values(
+                by=["Tipo", "DY 12m (%)"], ascending=[True, True]
+            ).reset_index(drop=True)
+            limites_por_tipo = {"Ação": teto_vermelho_acoes, "FII": teto_vermelho_fiis}
+            df_crescente["Teto Vermelho (R$)"] = df_crescente["Tipo"].map(limites_por_tipo)
+            df_crescente["Soma Acumulada (R$)"] = df_crescente.groupby("Tipo")["Valor Atualizado (R$)"].cumsum()
+            df_crescente["Soma Acumulada Anterior"] = (
+                df_crescente["Soma Acumulada (R$)"] - df_crescente["Valor Atualizado (R$)"]
+            )
+            df_crescente["E_Vermelho"] = (
+                df_crescente["Soma Acumulada Anterior"] < df_crescente["Teto Vermelho (R$)"]
+            )
 
             # EXIBIÇÃO: Reordena por DY DECRESCENTE
             df_final = df_crescente.sort_values(by="DY 12m (%)", ascending=False).reset_index(drop=True)
 
-            # RESUMO EXECUTIVO (CARDS DE METRICAS)
+            # ABAS DO DASHBOARD
             patrimonio_total = df_final["Valor Atualizado (R$)"].sum()
             custo_total_carteira = df_final["Custo Total Investido (R$)"].sum()
-            lucro_total = patrimonio_total - custo_total_carteira
             rentabilidade_geral = ((patrimonio_total / custo_total_carteira) - 1) * 100 if custo_total_carteira > 0 else 0
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Patrimônio Atual", f"R$ {patrimonio_total:,.2f}")
-            c2.metric("Custo Total Investido", f"R$ {custo_total_carteira:,.2f}")
-            c3.metric("Lucro / Prejuízo Total", f"R$ {lucro_total:,.2f}", delta=f"{lucro_total:,.2f}")
-            c4.metric("Rentabilidade da Carteira", f"{rentabilidade_geral:+.2f}%")
+            aba_geral, aba_acoes, aba_fiis = st.tabs(["Visão geral", "Ações", "FIIs"])
 
-            st.markdown("---")
+            with aba_geral:
+                c1, c2 = st.columns(2)
+                c1.metric("Patrimônio Atual", f"R$ {patrimonio_total:,.2f}")
+                c2.metric("Rentabilidade Geral da Carteira", f"{rentabilidade_geral:+.2f}%")
 
-            # GRÁFICO DE RESULTADO POR ATIVO
-            fig_bar = px.bar(
-                df_final.sort_values(by="Lucro/Prejuízo (R$)", ascending=True),
-                x="Lucro/Prejuízo (R$)",
-                y="Ticker",
-                orientation="h",
-                title="<b>Lucro / Prejuízo Acumulado por Ativo (R$)</b>",
-                color="Lucro/Prejuízo (R$)",
-                color_continuous_scale="RdYlGn"
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
+                df_grafico_geral = df_final.sort_values(
+                    by="Valor Atualizado (R$)", ascending=False
+                ).copy()
+                df_grafico_geral["Situação"] = np.where(
+                    df_grafico_geral["Lucro/Prejuízo (R$)"] >= 0,
+                    "Lucro",
+                    "Prejuízo",
+                )
+                df_grafico_geral["Ativo / Resultado"] = df_grafico_geral.apply(
+                    lambda row: (
+                        f"<span style='color: {'#2563EB' if row['Tipo'] == 'Ação' else '#EA580C'}'>"
+                        f"<b>{row['Ticker']}</b></span><br>"
+                        f"Resultado: R$ {row['Lucro/Prejuízo (R$)']:,.2f}"
+                    ),
+                    axis=1,
+                )
+                fig_valor_total = px.bar(
+                    df_grafico_geral,
+                    x="Ativo / Resultado",
+                    y="Valor Atualizado (R$)",
+                    title="<b>Valor Atual de Todos os Ativos (R$)</b>",
+                    color="Situação",
+                    color_discrete_map={"Lucro": "#16A34A", "Prejuízo": "#DC2626"},
+                    text="Valor Atualizado (R$)",
+                )
+                fig_valor_total.update_traces(
+                    texttemplate="R$ %{text:,.0f}",
+                    textposition="outside",
+                )
+                fig_valor_total.update_layout(
+                    height=550,
+                    xaxis_title=None,
+                    yaxis_title="Valor Atual (R$)",
+                    uniformtext_minsize=8,
+                    uniformtext_mode="hide",
+                )
+                st.plotly_chart(fig_valor_total, use_container_width=True, key="valor-total-carteira")
 
-            # TENDÊNCIA DOS PRINCIPAIS ATIVOS
-            st.subheader("Tendência dos 8 Ativos de Maior Valor — Últimos 14 Pregões")
-            principais_ativos = (
-                df_final
-                .nlargest(8, "Valor Atualizado (R$)")["Ticker"]
-                .tolist()
-            )
-            historicos = buscar_fechamentos_14_pregoes(tuple(principais_ativos))
-            grade_graficos = st.columns(2)
+            with aba_acoes:
+                exibir_painel_categoria(
+                    df_final[df_final["Tipo"] == "Ação"], "Ações", teto_vermelho_acoes
+                )
 
-            for indice, ticker in enumerate(principais_ativos):
-                with grade_graficos[indice % 2]:
-                    fechamento = historicos.get(ticker)
-                    if fechamento is None or len(fechamento) < 2:
-                        st.warning(f"Histórico insuficiente para {ticker}.")
-                        continue
-
-                    variacao = ((fechamento.iloc[-1] / fechamento.iloc[0]) - 1) * 100
-                    df_grafico = fechamento.rename("Fechamento (R$)").reset_index()
-                    df_grafico.columns = ["Data", "Fechamento (R$)"]
-
-                    fig_tendencia = px.line(
-                        df_grafico,
-                        x="Data",
-                        y="Fechamento (R$)",
-                        title=f"<b>{ticker}</b> · {variacao:+.2f}%",
-                    )
-                    fig_tendencia.update_traces(line=dict(color="#2563EB", width=2))
-                    fig_tendencia.update_layout(
-                        height=260,
-                        margin=dict(l=10, r=10, t=45, b=10),
-                        xaxis_title=None,
-                        yaxis_title="Preço (R$)",
-                        showlegend=False,
-                    )
-                    st.plotly_chart(
-                        fig_tendencia,
-                        use_container_width=True,
-                        key=f"tendencia-{ticker}",
-                    )
-
-            # TABELA DETALHADA COM REORDENAÇÃO PERSONALIZADA
-            st.subheader("📋 Tabela Detalhada de Posições (Ordenada por DY Decrescente)")
-            st.markdown(
-                f"*Os ativos selecionados pelos piores DYs para cobrir a entrada de **R$ {valor_entrada:,.2f}** "
-                f"estão destacados em **vermelho** nas colunas **Ticker** e **DY 12m (%)** ao final da tabela.*"
-            )
-
-            # NOVA ORDEM SOLICITADA DE COLUNAS
-            colunas_exibicao = [
-                "Ticker", 
-                "DY 12m (%)", 
-                "Valor Atualizado (R$)", 
-                "Lucro/Prejuízo (R$)", 
-                "Rentabilidade (%)", 
-                "Data 1ª Aquisição", 
-                "Quantidade", 
-                "Preço Médio (R$)", 
-                "Preço Atual (R$)", 
-                "Custo Total Investido (R$)", 
-                "Soma Acumulada (R$)"
-            ]
-
-            df_tabela = df_final[colunas_exibicao].copy()
-
-            def aplicar_estilo_pontual(data_frame_exibicao):
-                estilos = pd.DataFrame("", index=data_frame_exibicao.index, columns=data_frame_exibicao.columns)
-                css_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
-                
-                for idx, row in df_final.iterrows():
-                    if row["E_Vermelho"]:
-                        if "Ticker" in estilos.columns:
-                            estilos.loc[idx, "Ticker"] = css_vermelho
-                        if "DY 12m (%)" in estilos.columns:
-                            estilos.loc[idx, "DY 12m (%)"] = css_vermelho
-
-                return estilos
-
-            df_estilizado = (
-                df_tabela
-                .style
-                .apply(lambda _: aplicar_estilo_pontual(df_tabela), axis=None)
-                .format({
-                    "DY 12m (%)": "{:.2f}%",
-                    "Valor Atualizado (R$)": "R$ {:,.2f}",
-                    "Lucro/Prejuízo (R$)": "R$ {:,.2f}",
-                    "Rentabilidade (%)": "{:+.2f}%",
-                    "Quantidade": "{:,.0f}",
-                    "Preço Médio (R$)": "R$ {:,.2f}",
-                    "Preço Atual (R$)": "R$ {:,.2f}",
-                    "Custo Total Investido (R$)": "R$ {:,.2f}",
-                    "Soma Acumulada (R$)": "R$ {:,.2f}"
-                }, na_rep="-")
-            )
-
-            st.dataframe(
-                df_estilizado,
-                use_container_width=True,
-                height=500
-            )
+            with aba_fiis:
+                exibir_painel_categoria(
+                    df_final[df_final["Tipo"] == "FII"], "FIIs", teto_vermelho_fiis
+                )
 
 else:
     st.info("👆 Por favor, envie a planilha de Movimentações (`.xlsx`) da B3 na barra lateral para carregar a análise.")
