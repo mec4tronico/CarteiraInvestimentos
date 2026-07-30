@@ -220,9 +220,36 @@ if arquivo_upload is not None:
 
         df_final = pd.DataFrame(dados_completos)
 
+        # --- AGRUPAR DY EM INTERVALOS DE 2% E ORDENAR ---
+        df_final["DY 12m (%)"] = pd.to_numeric(df_final["DY 12m (%)"], errors="coerce")
+        bin_size = 2.0
+
+        def dy_group_label(dy_val):
+            if pd.isna(dy_val):
+                return "Sem DY"
+            lower = np.floor(dy_val / bin_size) * bin_size
+            upper = lower + bin_size
+            # se lower e upper forem iguais a inteiros, mostra sem decimais
+            return f"{int(lower)}% a {int(upper)}%"
+
+        # lower bound numérico do grupo (para ordenação)
+        df_final["dy_group_lower"] = df_final["DY 12m (%)"].apply(lambda x: np.floor(x / bin_size) * bin_size if pd.notnull(x) else np.nan)
+        df_final["DY Group"] = df_final["DY 12m (%)"].apply(dy_group_label)
+
+        # Substitui NaN por valor muito baixo para que 'Sem DY' fique ao final no sort descending
+        df_final["dy_group_sort"] = df_final["dy_group_lower"].fillna(-9999)
+
+        # Ordena: primeiro por dy_group_sort (desc), depois por Lucro/Prejuízo (desc -> maiores lucros primeiro)
+        df_final_sorted = df_final.sort_values(by=["dy_group_sort", "Lucro/Prejuízo (R$)"], ascending=[False, False]).reset_index(drop=True)
+
+        # Para exibição e gráficos, removemos colunas auxiliares
+        df_display = df_final_sorted.copy()
+        # mantém a coluna DY Group para exibição; descartamos dy_group_lower/dy_group_sort
+        df_display = df_display.drop(columns=["dy_group_lower", "dy_group_sort"], errors="ignore")
+
         # RESUMO EXECUTIVO (CARDS DE METRICAS)
-        patrimonio_total = df_final["Valor Atualizado (R$)"].sum()
-        custo_total_carteira = df_final["Custo Total Investido (R$)"].sum()
+        patrimonio_total = df_display["Valor Atualizado (R$)"].sum()
+        custo_total_carteira = df_display["Custo Total Investido (R$)"].sum()
         lucro_total = patrimonio_total - custo_total_carteira
         rentabilidade_geral = ((patrimonio_total / custo_total_carteira) - 1) * 100 if custo_total_carteira > 0 else 0
 
@@ -234,12 +261,12 @@ if arquivo_upload is not None:
 
         st.markdown("---")
 
-        # GRÁFICOS
+        # GRÁFICOS (usando df_display)
         g1, g2 = st.columns(2)
 
         with g1:
             fig_pie = px.pie(
-                df_final, 
+                df_display, 
                 values="Valor Atualizado (R$)", 
                 names="Ticker", 
                 title="<b>Alocação por Ativo</b>",
@@ -248,23 +275,43 @@ if arquivo_upload is not None:
             st.plotly_chart(fig_pie, use_container_width=True)
 
         with g2:
+            # Para preservar a ordenação por DY group e lucro, usamos category_orders com a ordem dos tickers.
+            ordered_tickers = df_display["Ticker"].tolist()
+            # inverter para que o primeiro item da lista apareça no topo do gráfico horizontal
+            category_order = ordered_tickers[::-1]
+
             fig_bar = px.bar(
-                df_final.sort_values(by="Lucro/Prejuízo (R$)", ascending=True), 
-                x="Lucro/Prejuízo (R$)", 
-                y="Ticker", 
+                df_display,
+                x="Lucro/Prejuízo (R$)",
+                y="Ticker",
                 orientation="h",
                 title="<b>Lucro / Prejuízo Acumulado por Ativo (R$)</b>",
                 color="Lucro/Prejuízo (R$)",
-                color_continuous_scale="RdYlGn"
+                color_continuous_scale="RdYlGn",
+                category_orders={"Ticker": category_order}
             )
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # TABELA DETALHADA COM DATAS E PREÇO MÉDIO
+        # TABELA DETALHADA COM DATAS E PREÇO MÉDIO (ordenada e com grupos de DY)
         st.subheader("📋 Tabela Detalhada de Posições")
-        st.markdown("*O **Lucro/Prejuízo (R$)** e a **Rentabilidade (%)** consideram o histórico de aquisições desde a **Data da 1ª Aquisição**.*")
+        st.markdown("*A tabela está agrupada por faixas de DY (2% por faixa) e dentro de cada faixa ordenada por Lucro/Prejuízo (maiores lucros primeiro).*")
+
+        display_cols = [
+            "DY Group",
+            "Ticker",
+            "Data 1ª Aquisição",
+            "Quantidade",
+            "Preço Médio (R$)",
+            "Preço Atual (R$)",
+            "Custo Total Investido (R$)",
+            "Valor Atualizado (R$)",
+            "Lucro/Prejuízo (R$)",
+            "Rentabilidade (%)",
+            "DY 12m (%)",
+        ]
 
         st.dataframe(
-            df_final.style.format({
+            df_display[display_cols].style.format({
                 "Quantidade": "{:,.0f}",
                 "Preço Médio (R$)": "R$ {:,.2f}",
                 "Preço Atual (R$)": "R$ {:,.2f}",
