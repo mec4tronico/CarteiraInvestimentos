@@ -173,15 +173,6 @@ st.markdown("Análise consolidada do Extrato Oficial de Movimentações da B3.")
 st.sidebar.header("📂 Importação de Dados")
 arquivo_upload = st.sidebar.file_uploader("Envie a planilha `.xlsx` da B3", type=["xlsx"])
 
-# Configuração da Entrada do APTO na Sidebar
-st.sidebar.header("🏠 Entrada do APTO")
-valor_entrada = st.sidebar.number_input(
-    "Valor da Entrada (R$):",
-    value=85000.0,
-    step=1000.0,
-    format="%.2f"
-)
-
 if arquivo_upload is not None:
     ativos = processar_movimentacoes_b3(arquivo_upload)
 
@@ -224,25 +215,14 @@ if arquivo_upload is not None:
                 "Valor Atualizado (R$)": val_atualizado,
                 "Lucro/Prejuízo (R$)": lucro_prejuizo,
                 "Rentabilidade (%)": rentabilidade_pct,
-                "DY 12m (%)": dados.get("dy")
+                "DY 12m (%)": dados.get("dy") if dados.get("dy") is not None else 0.0
             })
 
-        df_final = pd.DataFrame(dados_completos)
-
-        # ORDENAÇÃO E CÁLCULO DA SOMA ACUMULADA PARA A ENTRADA DO APTO
-        # Ordena pelos piores ativos primeiro (menor rentabilidade)
-        df_final = df_final.sort_values(by="Rentabilidade (%)", ascending=True).reset_index(drop=True)
-        
-        # Calcula o valor acumulado e identifica a linha anterior a atingir a meta
-        df_final["Soma Acumulada (R$)"] = df_final["Valor Atualizado (R$)"].cumsum()
-        df_final["Soma Acumulada Anterior"] = df_final["Soma Acumulada (R$)"].shift(1, fill_value=0.0)
-        
-        # O ativo entra no montante se a soma das posições piores anteriores ainda não tiver atingido a entrada
-        df_final["Vender para Entrada"] = df_final["Soma Acumulada Anterior"] < valor_entrada
+        df_base = pd.DataFrame(dados_completos)
 
         # RESUMO EXECUTIVO (CARDS DE METRICAS)
-        patrimonio_total = df_final["Valor Atualizado (R$)"].sum()
-        custo_total_carteira = df_final["Custo Total Investido (R$)"].sum()
+        patrimonio_total = df_base["Valor Atualizado (R$)"].sum()
+        custo_total_carteira = df_base["Custo Total Investido (R$)"].sum()
         lucro_total = patrimonio_total - custo_total_carteira
         rentabilidade_geral = ((patrimonio_total / custo_total_carteira) - 1) * 100 if custo_total_carteira > 0 else 0
 
@@ -259,7 +239,7 @@ if arquivo_upload is not None:
 
         with g1:
             fig_pie = px.pie(
-                df_final, 
+                df_base, 
                 values="Valor Atualizado (R$)", 
                 names="Ticker", 
                 title="<b>Alocação por Ativo</b>",
@@ -269,7 +249,7 @@ if arquivo_upload is not None:
 
         with g2:
             fig_bar = px.bar(
-                df_final.sort_values(by="Lucro/Prejuízo (R$)", ascending=True), 
+                df_base.sort_values(by="Lucro/Prejuízo (R$)", ascending=True), 
                 x="Lucro/Prejuízo (R$)", 
                 y="Ticker", 
                 orientation="h",
@@ -279,20 +259,58 @@ if arquivo_upload is not None:
             )
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # TABELA DETALHADA COM HIGHLIGHT PARA VENDA DE ENTRADA
-        st.subheader("📋 Tabela Detalhada de Posições (Ordenada dos Piores para os Melhores)")
-        st.markdown(f"*Os ativos destacados em **vermelho** são os piores desempenhos acumulados necessários para cobrir a entrada de **R$ {valor_entrada:,.2f}**.*")
+        st.markdown("---")
 
-        # Função para aplicar estilos condicionais por linha na tabela
-        def destacar_venda_entrada(row):
-            if row["Vender para Entrada"]:
-                return ["background-color: rgba(255, 75, 75, 0.25); color: #FF4B4B; font-weight: bold;"] * len(row)
-            return [""] * len(row)
+        # ==============================================================================
+        # TABELA DETALHADA COM REGRAS DE TETO E DESTAQUE PONTUAL DE COR
+        # ==============================================================================
+        st.subheader("📋 Tabela Detalhada de Posições")
+        st.markdown("*O **Lucro/Prejuízo (R$)** e a **Rentabilidade (%)** consideram o histórico de aquisições desde a **Data da 1ª Aquisição**.*")
 
-        df_exibicao = df_final.drop(columns=["Soma Acumulada Anterior", "Vender para Entrada"])
+        # Entrada para definir o Teto de Aporte/Acúmulo
+        teto = st.sidebar.number_input(
+            "🎯 Valor Teto de Aporte (R$):", 
+            value=1000.0, 
+            step=100.0,
+            help="Ativos com piores DYs acumulando até este valor serão destacados em vermelho na tabela."
+        )
 
-        st.dataframe(
-            df_exibicao.style.apply(destacar_venda_entrada, axis=1).format({
+        # 1. Ordenação temporária por DY crescente para selecionar os piores DYs
+        df_crescente = df_base.sort_values(by="DY 12m (%)", ascending=True).copy()
+        
+        # 2. Calcula o acumulado usando o 'Valor Atualizado (R$)'
+        df_crescente["Soma_Acumulada"] = df_crescente["Valor Atualizado (R$)"].cumsum()
+        
+        # 3. Marca como True os ativos piores em DY que somados cabem no teto
+        df_crescente["E_Vermelho"] = df_crescente["Soma_Acumulada"] <= teto
+
+        # 4. Reordena para exibição final em DY Decrescente
+        df_final = df_crescente.sort_values(by="DY 12m (%)", ascending=False).reset_index(drop=True)
+
+        # 5. Função para destacar em vermelho apenas Ticker e DY 12m (%)
+        def destacar_celulas_vermelhas(df_exibicao):
+            estilos = pd.DataFrame("", index=df_exibicao.index, columns=df_exibicao.columns)
+            style_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
+            
+            for idx, row in df_exibicao.iterrows():
+                if row["E_Vermelho"]:
+                    estilos.loc[idx, "Ticker"] = style_vermelho
+                    estilos.loc[idx, "DY 12m (%)"] = style_vermelho
+
+            return estilos
+
+        # Colunas a serem exibidas na tabela final
+        colunas_exibir = [
+            "Ticker", "Data 1ª Aquisição", "Quantidade", "Preço Médio (R$)",
+            "Preço Atual (R$)", "Custo Total Investido (R$)", "Valor Atualizado (R$)",
+            "Lucro/Prejuízo (R$)", "Rentabilidade (%)", "DY 12m (%)"
+        ]
+
+        df_estilizado = (
+            df_final[colunas_exibir]
+            .style
+            .apply(lambda _: destacar_celulas_vermelhas(df_final), axis=None)
+            .format({
                 "Quantidade": "{:,.0f}",
                 "Preço Médio (R$)": "R$ {:,.2f}",
                 "Preço Atual (R$)": "R$ {:,.2f}",
@@ -301,11 +319,10 @@ if arquivo_upload is not None:
                 "Lucro/Prejuízo (R$)": "R$ {:,.2f}",
                 "Rentabilidade (%)": "{:+.2f}%",
                 "DY 12m (%)": "{:.2f}%",
-                "Soma Acumulada (R$)": "R$ {:,.2f}"
-            }, na_rep="-"),
-            use_container_width=True,
-            height=500
+            }, na_rep="-")
         )
+
+        st.dataframe(df_estilizado, use_container_width=True, height=500)
 
 else:
     st.info("👆 Por favor, envie a planilha de Movimentações (`.xlsx`) da B3 na barra lateral para carregar a análise.")
