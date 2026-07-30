@@ -39,7 +39,6 @@ def limpar_valor_numerico(val):
 @st.cache_data(ttl=1800)
 def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
     """Processa o Extrato de Movimentações da B3 para calcular a posição real,
-
     Preço Médio ponderado e Data da Primeira Aquisição por ativo.
     """
     df = pd.read_excel(file_bytes)
@@ -291,10 +290,8 @@ if arquivo_upload is not None:
                 return ["background-color: rgba(255, 75, 75, 0.25); color: #FF4B4B; font-weight: bold;"] * len(row)
             return [""] * len(row)
 
-        df_exibicao = df_final.drop(columns=["Soma Acumulada Anterior", "Vender para Entrada"])
-
         st.dataframe(
-            df_exibicao.style.apply(destacar_venda_entrada, axis=1).format({
+            df_final.style.apply(destacar_venda_entrada, axis=1).format({
                 "Quantidade": "{:,.0f}",
                 "Preço Médio (R$)": "R$ {:,.2f}",
                 "Preço Atual (R$)": "R$ {:,.2f}",
@@ -305,6 +302,10 @@ if arquivo_upload is not None:
                 "DY 12m (%)": "{:.2f}%",
                 "Soma Acumulada (R$)": "R$ {:,.2f}"
             }, na_rep="-"),
+            column_config={
+                "Soma Acumulada Anterior": None,
+                "Vender para Entrada": None
+            },
             use_container_width=True,
             height=500
         )
