@@ -1,7 +1,7 @@
 """app_carteira.py
 
 Dashboard Interativo da Carteira de Investimentos
-Ajustado para o Extrato Oficial de Movimentações da B3 com regras de exceção e tolerância de custódia.
+Ajustado com reordenação personalizada de colunas e regras de custódia B3.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -124,7 +124,6 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
     # ==============================================================================
     resumo = []
     for t, p in posicoes.items():
-        # Filtra estritamente ativos onde a quantidade é MAIOR que 5
         if p['quantidade'] > QTD_MINIMA_TOLERANCIA and p['custo_total'] > 0:
             pm = p['custo_total'] / p['quantidade']
             data_exibicao = p['primeira_compra'].strftime('%d/%m/%Y') if pd.notnull(p['primeira_compra']) else '-'
@@ -197,7 +196,6 @@ valor_entrada = st.sidebar.number_input(
 )
 
 if arquivo_upload is not None:
-    # Retorna apenas ativos com quantidade > 5
     ativos = processar_movimentacoes_b3(arquivo_upload)
 
     if ativos.empty:
@@ -231,15 +229,15 @@ if arquivo_upload is not None:
 
             dados_completos.append({
                 "Ticker": ticker,
+                "DY 12m (%)": dados.get("dy", 0.0),
+                "Valor Atualizado (R$)": val_atualizado,
+                "Lucro/Prejuízo (R$)": lucro_prejuizo,
+                "Rentabilidade (%)": rentabilidade_pct,
                 "Data 1ª Aquisição": data_acq,
                 "Quantidade": qtd,
                 "Preço Médio (R$)": pm,
                 "Preço Atual (R$)": preco_atual,
                 "Custo Total Investido (R$)": custo_total,
-                "Valor Atualizado (R$)": val_atualizado,
-                "Lucro/Prejuízo (R$)": lucro_prejuizo,
-                "Rentabilidade (%)": rentabilidade_pct,
-                "DY 12m (%)": dados.get("dy", 0.0)
             })
 
         df_base = pd.DataFrame(dados_completos)
@@ -300,24 +298,25 @@ if arquivo_upload is not None:
                 )
                 st.plotly_chart(fig_bar, use_container_width=True)
 
-            # TABELA DETALHADA COM HIGHLIGHT PONTUAL
+            # TABELA DETALHADA COM REORDENAÇÃO PERSONALIZADA
             st.subheader("📋 Tabela Detalhada de Posições (Ordenada por DY Decrescente)")
             st.markdown(
                 f"*Os ativos selecionados pelos piores DYs para cobrir a entrada de **R$ {valor_entrada:,.2f}** "
                 f"estão destacados em **vermelho** nas colunas **Ticker** e **DY 12m (%)** ao final da tabela.*"
             )
 
+            # NOVA ORDEM SOLICITADA DE COLUNAS
             colunas_exibicao = [
                 "Ticker", 
+                "DY 12m (%)", 
+                "Valor Atualizado (R$)", 
+                "Lucro/Prejuízo (R$)", 
+                "Rentabilidade (%)", 
                 "Data 1ª Aquisição", 
                 "Quantidade", 
                 "Preço Médio (R$)", 
                 "Preço Atual (R$)", 
                 "Custo Total Investido (R$)", 
-                "Valor Atualizado (R$)", 
-                "Lucro/Prejuízo (R$)", 
-                "Rentabilidade (%)", 
-                "DY 12m (%)", 
                 "Soma Acumulada (R$)"
             ]
 
@@ -341,14 +340,14 @@ if arquivo_upload is not None:
                 .style
                 .apply(lambda _: aplicar_estilo_pontual(df_tabela), axis=None)
                 .format({
+                    "DY 12m (%)": "{:.2f}%",
+                    "Valor Atualizado (R$)": "R$ {:,.2f}",
+                    "Lucro/Prejuízo (R$)": "R$ {:,.2f}",
+                    "Rentabilidade (%)": "{:+.2f}%",
                     "Quantidade": "{:,.0f}",
                     "Preço Médio (R$)": "R$ {:,.2f}",
                     "Preço Atual (R$)": "R$ {:,.2f}",
                     "Custo Total Investido (R$)": "R$ {:,.2f}",
-                    "Valor Atualizado (R$)": "R$ {:,.2f}",
-                    "Lucro/Prejuízo (R$)": "R$ {:,.2f}",
-                    "Rentabilidade (%)": "{:+.2f}%",
-                    "DY 12m (%)": "{:.2f}%",
                     "Soma Acumulada (R$)": "R$ {:,.2f}"
                 }, na_rep="-")
             )
