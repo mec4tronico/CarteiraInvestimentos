@@ -39,6 +39,7 @@ def limpar_valor_numerico(val):
 @st.cache_data(ttl=1800)
 def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
     """Processa o Extrato de Movimentações da B3 para calcular a posição real,
+
     Preço Médio ponderado e Data da Primeira Aquisição por ativo.
     """
     df = pd.read_excel(file_bytes)
@@ -228,17 +229,15 @@ if arquivo_upload is not None:
 
         df_final = pd.DataFrame(dados_completos)
 
-        # ORDENAÇÃO E CÁLCULO COM BASE NO MENOR DY 12m (%)
-        # Preenche DY nulos com 0.0 para garantir que apareçam no topo dos piores
-        df_final["DY_aux"] = df_final["DY 12m (%)"].fillna(0.0)
-        df_final = df_final.sort_values(by="DY_aux", ascending=True).reset_index(drop=True)
-        df_final = df_final.drop(columns=["DY_aux"])
-
+        # ORDENAÇÃO E CÁLCULO DA SOMA ACUMULADA PARA A ENTRADA DO APTO
+        # Ordena pelos piores ativos primeiro (menor rentabilidade)
+        df_final = df_final.sort_values(by="Rentabilidade (%)", ascending=True).reset_index(drop=True)
+        
         # Calcula o valor acumulado e identifica a linha anterior a atingir a meta
         df_final["Soma Acumulada (R$)"] = df_final["Valor Atualizado (R$)"].cumsum()
         df_final["Soma Acumulada Anterior"] = df_final["Soma Acumulada (R$)"].shift(1, fill_value=0.0)
         
-        # O ativo entra no montante se a soma das posições de menor DY anteriores ainda não atingiu a entrada
+        # O ativo entra no montante se a soma das posições piores anteriores ainda não tiver atingido a entrada
         df_final["Vender para Entrada"] = df_final["Soma Acumulada Anterior"] < valor_entrada
 
         # RESUMO EXECUTIVO (CARDS DE METRICAS)
@@ -281,8 +280,8 @@ if arquivo_upload is not None:
             st.plotly_chart(fig_bar, use_container_width=True)
 
         # TABELA DETALHADA COM HIGHLIGHT PARA VENDA DE ENTRADA
-        st.subheader("📋 Tabela Detalhada de Posições (Ordenada por Menor DY 12m)")
-        st.markdown(f"*Os ativos destacados em **vermelho** são os de **menor Dividend Yield (DY)** necessários para cobrir a entrada de **R$ {valor_entrada:,.2f}**.*")
+        st.subheader("📋 Tabela Detalhada de Posições (Ordenada dos Piores para os Melhores)")
+        st.markdown(f"*Os ativos destacados em **vermelho** são os piores desempenhos acumulados necessários para cobrir a entrada de **R$ {valor_entrada:,.2f}**.*")
 
         # Função para aplicar estilos condicionais por linha na tabela
         def destacar_venda_entrada(row):
@@ -290,8 +289,10 @@ if arquivo_upload is not None:
                 return ["background-color: rgba(255, 75, 75, 0.25); color: #FF4B4B; font-weight: bold;"] * len(row)
             return [""] * len(row)
 
+        df_exibicao = df_final.drop(columns=["Soma Acumulada Anterior", "Vender para Entrada"])
+
         st.dataframe(
-            df_final.style.apply(destacar_venda_entrada, axis=1).format({
+            df_exibicao.style.apply(destacar_venda_entrada, axis=1).format({
                 "Quantidade": "{:,.0f}",
                 "Preço Médio (R$)": "R$ {:,.2f}",
                 "Preço Atual (R$)": "R$ {:,.2f}",
@@ -302,10 +303,6 @@ if arquivo_upload is not None:
                 "DY 12m (%)": "{:.2f}%",
                 "Soma Acumulada (R$)": "R$ {:,.2f}"
             }, na_rep="-"),
-            column_config={
-                "Soma Acumulada Anterior": None,
-                "Vender para Entrada": None
-            },
             use_container_width=True,
             height=500
         )
