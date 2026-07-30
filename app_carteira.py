@@ -1,7 +1,7 @@
 """app_carteira.py
 
 Dashboard Interativo da Carteira de Investimentos
-Ajustado para o Extrato Oficial de Movimentações da B3 com exceções de regras de negócio.
+Ajustado para o Extrato Oficial de Movimentações da B3 com regras de exceção e tolerância de custódia.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -22,13 +22,16 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# DICIONÁRIO DE EXCEÇÕES / REGRAS DE MUDANÇA DE TICKER
+# CONFIGURAÇÕES E EXCEÇÕES DE REGRAS DE NEGÓCIO
 # ==============================================================================
 TICKER_MAP = {
     "ELET3": "AXIA3",
     "ELET6": "AXIA6",
     # Adicione novos de-para aqui caso outros ativos mudem de código
 }
+
+# Tolerância Mínima: Ativos com quantidade <= QTD_MINIMA_TOLERANCIA serão descartados
+QTD_MINIMA_TOLERANCIA = 5.0
 
 
 def limpar_valor_numerico(val):
@@ -46,8 +49,8 @@ def limpar_valor_numerico(val):
 
 @st.cache_data(ttl=1800)
 def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
-    """Processa o Extrato de Movimentações da B3 para calcular a posição real,
-    Preço Médio ponderado e Data da Primeira Aquisição por ativo.
+    """Processa o Extrato de Movimentações da B3, auditando e aplicando a
+    tolerância mínima de quantidade (> 5 cotas/ações).
     """
     df = pd.read_excel(file_bytes)
 
@@ -59,10 +62,10 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
     df['Valor_num'] = df['Valor da Operação'].apply(limpar_valor_numerico)
     df['Preco_num'] = df['Preço unitário'].apply(limpar_valor_numerico)
 
-    # Extrai o Ticker do produto (ex: "AXIA3 - CENTRAIS ELETRICAS..." -> "AXIA3")
+    # Extrai o Ticker do produto
     df['Ticker'] = df['Produto'].astype(str).str.split('-').str[0].str.strip()
 
-    # EXCEÇÃO 1: Mapeamento e substituição de tickers (Ex: ELET3 -> AXIA3)
+    # Mapeamento e substituição de tickers antigos (Ex: ELET3 -> AXIA3)
     df['Ticker'] = df['Ticker'].replace(TICKER_MAP)
 
     posicoes = {}
@@ -102,27 +105,28 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
         is_venda = (mov == 'Venda' or (mov == 'Transferência - Liquidação' and tipo == 'Debito'))
 
         if is_compra:
-            # Se for compra sem valor informado na linha, calcula via Preço Unitário * Qtd
             if valor_op == 0 and row['Preco_num'] > 0:
                 valor_op = row['Preco_num'] * qtd
 
             posicoes[ticker]['quantidade'] += qtd
             posicoes[ticker]['custo_total'] += valor_op
 
-            # Grava a menor data (data de aquisição inicial do ativo)
             if posicoes[ticker]['primeira_compra'] is None or (pd.notnull(data_op) and data_op < posicoes[ticker]['primeira_compra']):
                 posicoes[ticker]['primeira_compra'] = data_op
 
         elif is_venda and posicoes[ticker]['quantidade'] > 0:
-            # Baixa proporcional do custo acumulado
             pm = posicoes[ticker]['custo_total'] / posicoes[ticker]['quantidade']
             posicoes[ticker]['quantidade'] = max(0.0, posicoes[ticker]['quantidade'] - qtd)
             posicoes[ticker]['custo_total'] = posicoes[ticker]['quantidade'] * pm
 
+    # ==============================================================================
+    # AUDITORIA DE SALDO: TOLERÂNCIA DE QUANTIDADE > 5
+    # ==============================================================================
     resumo = []
     for t, p in posicoes.items():
-        if p['quantidade'] > 0:
-            pm = p['custo_total'] / p['quantidade'] if p['quantidade'] > 0 else 0
+        # Filtra estritamente ativos onde a quantidade é MAIOR que 5
+        if p['quantidade'] > QTD_MINIMA_TOLERANCIA and p['custo_total'] > 0:
+            pm = p['custo_total'] / p['quantidade']
             data_exibicao = p['primeira_compra'].strftime('%d/%m/%Y') if pd.notnull(p['primeira_compra']) else '-'
             resumo.append({
                 'ticker': p['ticker'],
@@ -193,11 +197,14 @@ valor_entrada = st.sidebar.number_input(
 )
 
 if arquivo_upload is not None:
+    # Retorna apenas ativos com quantidade > 5
     ativos = processar_movimentacoes_b3(arquivo_upload)
 
     if ativos.empty:
-        st.error("Nenhuma posição ativa em Ações/FIIs foi identificada no arquivo enviado.")
+        st.error(f"Nenhum ativo com quantidade superior a {int(QTD_MINIMA_TOLERANCIA)} cotas/ações foi identificado.")
     else:
+        st.sidebar.success(f"{len(ativos)} ativos com quantidade > {int(QTD_MINIMA_TOLERANCIA)} consolidados!")
+
         with st.spinner("Buscando cotações atualizadas na B3..."):
             tickers_list = ativos["ticker"].tolist()
             with ThreadPoolExecutor(max_workers=10) as executor:
@@ -237,31 +244,21 @@ if arquivo_upload is not None:
 
         df_base = pd.DataFrame(dados_completos)
 
-        # ==============================================================================
-        # EXCEÇÃO 2: REMOVE ATIVOS COM VALOR ATUAL ZERADO LOGO NO INÍCIO
-        # ==============================================================================
+        # Filtro final de segurança sobre valor atualizado
         df_base = df_base[df_base["Valor Atualizado (R$)"] > 0].reset_index(drop=True)
 
         if df_base.empty:
             st.warning("Todos os ativos identificados possuem valor atual zerado.")
         else:
-            st.sidebar.success(f"{len(df_base)} ativos válidos na carteira!")
-
-            # ==============================================================================
             # SELEÇÃO: Ordena por DY CRESCENTE -> Soma acumulada até o teto
-            # ==============================================================================
             df_crescente = df_base.sort_values(by="DY 12m (%)", ascending=True).reset_index(drop=True)
             
-            # Soma acumulada considerando o valor atualizado dos ativos
             df_crescente["Soma Acumulada (R$)"] = df_crescente["Valor Atualizado (R$)"].cumsum()
             df_crescente["Soma Acumulada Anterior"] = df_crescente["Soma Acumulada (R$)"].shift(1, fill_value=0.0)
 
-            # O ativo é 'Vermelho' (para a Entrada) se a soma anterior ainda não atingiu o valor da entrada
             df_crescente["E_Vermelho"] = df_crescente["Soma Acumulada Anterior"] < valor_entrada
 
-            # ==============================================================================
-            # EXIBIÇÃO: Reordena por DY DECRESCENTE (Vermelhos vão para o final)
-            # ==============================================================================
+            # EXIBIÇÃO: Reordena por DY DECRESCENTE
             df_final = df_crescente.sort_values(by="DY 12m (%)", ascending=False).reset_index(drop=True)
 
             # RESUMO EXECUTIVO (CARDS DE METRICAS)
@@ -303,14 +300,13 @@ if arquivo_upload is not None:
                 )
                 st.plotly_chart(fig_bar, use_container_width=True)
 
-            # TABELA DETALHADA COM HIGHLIGHT PONTUAL (TICKER + DY)
+            # TABELA DETALHADA COM HIGHLIGHT PONTUAL
             st.subheader("📋 Tabela Detalhada de Posições (Ordenada por DY Decrescente)")
             st.markdown(
                 f"*Os ativos selecionados pelos piores DYs para cobrir a entrada de **R$ {valor_entrada:,.2f}** "
                 f"estão destacados em **vermelho** nas colunas **Ticker** e **DY 12m (%)** ao final da tabela.*"
             )
 
-            # Seleção de colunas para exibição na tela
             colunas_exibicao = [
                 "Ticker", 
                 "Data 1ª Aquisição", 
@@ -327,7 +323,6 @@ if arquivo_upload is not None:
 
             df_tabela = df_final[colunas_exibicao].copy()
 
-            # Função de estilo corrigida (cria a matriz com as mesmas colunas de df_tabela)
             def aplicar_estilo_pontual(data_frame_exibicao):
                 estilos = pd.DataFrame("", index=data_frame_exibicao.index, columns=data_frame_exibicao.columns)
                 css_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
