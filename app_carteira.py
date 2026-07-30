@@ -1,8 +1,7 @@
-"""
-app_carteira.py
+"""app_carteira.py
 
 Dashboard Interativo da Carteira de Investimentos
-Ajustado para o Extrato Oficial de Movimentações da B3.
+Ajustado para o Extrato Oficial de Movimentações da B3 com exceções de regras de negócio.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +20,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ==============================================================================
+# DICIONÁRIO DE EXCEÇÕES / REGRAS DE MUDANÇA DE TICKER
+# ==============================================================================
+TICKER_MAP = {
+    "ELET3": "AXIA3",
+    "ELET6": "AXIA6",
+    # Adicione novos de-para aqui caso outros ativos mudem de código
+}
 
 
 def limpar_valor_numerico(val):
@@ -53,6 +61,9 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
 
     # Extrai o Ticker do produto (ex: "AXIA3 - CENTRAIS ELETRICAS..." -> "AXIA3")
     df['Ticker'] = df['Produto'].astype(str).str.split('-').str[0].str.strip()
+
+    # EXCEÇÃO 1: Mapeamento e substituição de tickers (Ex: ELET3 -> AXIA3)
+    df['Ticker'] = df['Ticker'].replace(TICKER_MAP)
 
     posicoes = {}
 
@@ -187,8 +198,6 @@ if arquivo_upload is not None:
     if ativos.empty:
         st.error("Nenhuma posição ativa em Ações/FIIs foi identificada no arquivo enviado.")
     else:
-        st.sidebar.success(f"{len(ativos)} ativos consolidados na carteira!")
-
         with st.spinner("Buscando cotações atualizadas na B3..."):
             tickers_list = ativos["ticker"].tolist()
             with ThreadPoolExecutor(max_workers=10) as executor:
@@ -229,121 +238,131 @@ if arquivo_upload is not None:
         df_base = pd.DataFrame(dados_completos)
 
         # ==============================================================================
-        # SELEÇÃO: Ordena por DY CRESCENTE -> Soma acumulada até o teto
+        # EXCEÇÃO 2: REMOVE ATIVOS COM VALOR ATUAL ZERADO LOGO NO INÍCIO
         # ==============================================================================
-        df_crescente = df_base.sort_values(by="DY 12m (%)", ascending=True).reset_index(drop=True)
-        
-        # Soma acumulada considerando o valor atualizado dos ativos
-        df_crescente["Soma Acumulada (R$)"] = df_crescente["Valor Atualizado (R$)"].cumsum()
-        df_crescente["Soma Acumulada Anterior"] = df_crescente["Soma Acumulada (R$)"].shift(1, fill_value=0.0)
+        df_base = df_base[df_base["Valor Atualizado (R$)"] > 0].reset_index(drop=True)
 
-        # O ativo é 'Vermelho' (para a Entrada) se a soma anterior ainda não atingiu o valor da entrada
-        df_crescente["E_Vermelho"] = df_crescente["Soma Acumulada Anterior"] < valor_entrada
+        if df_base.empty:
+            st.warning("Todos os ativos identificados possuem valor atual zerado.")
+        else:
+            st.sidebar.success(f"{len(df_base)} ativos válidos na carteira!")
 
-        # ==============================================================================
-        # EXIBIÇÃO: Reordena por DY DECRESCENTE (Vermelhos vão para o final)
-        # ==============================================================================
-        df_final = df_crescente.sort_values(by="DY 12m (%)", ascending=False).reset_index(drop=True)
-
-        # RESUMO EXECUTIVO (CARDS DE METRICAS)
-        patrimonio_total = df_final["Valor Atualizado (R$)"].sum()
-        custo_total_carteira = df_final["Custo Total Investido (R$)"].sum()
-        lucro_total = patrimonio_total - custo_total_carteira
-        rentabilidade_geral = ((patrimonio_total / custo_total_carteira) - 1) * 100 if custo_total_carteira > 0 else 0
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Patrimônio Atual", f"R$ {patrimonio_total:,.2f}")
-        c2.metric("Custo Total Investido", f"R$ {custo_total_carteira:,.2f}")
-        c3.metric("Lucro / Prejuízo Total", f"R$ {lucro_total:,.2f}", delta=f"{lucro_total:,.2f}")
-        c4.metric("Rentabilidade da Carteira", f"{rentabilidade_geral:+.2f}%")
-
-        st.markdown("---")
-
-        # GRÁFICOS
-        g1, g2 = st.columns(2)
-
-        with g1:
-            fig_pie = px.pie(
-                df_final, 
-                values="Valor Atualizado (R$)", 
-                names="Ticker", 
-                title="<b>Alocação por Ativo</b>",
-                hole=0.4
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-        with g2:
-            fig_bar = px.bar(
-                df_final.sort_values(by="Lucro/Prejuízo (R$)", ascending=True), 
-                x="Lucro/Prejuízo (R$)", 
-                y="Ticker", 
-                orientation="h",
-                title="<b>Lucro / Prejuízo Acumulado por Ativo (R$)</b>",
-                color="Lucro/Prejuízo (R$)",
-                color_continuous_scale="RdYlGn"
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        # TABELA DETALHADA COM HIGHLIGHT PONTUAL (TICKER + DY)
-        st.subheader("📋 Tabela Detalhada de Posições (Ordenada por DY Decrescente)")
-        st.markdown(
-            f"*Os ativos selecionados pelos piores DYs para cobrir a entrada de **R$ {valor_entrada:,.2f}** "
-            f"estão destacados em **vermelho** nas colunas **Ticker** e **DY 12m (%)** ao final da tabela.*"
-        )
-
-        # Seleção de colunas para exibição na tela
-        colunas_exibicao = [
-            "Ticker", 
-            "Data 1ª Aquisição", 
-            "Quantidade", 
-            "Preço Médio (R$)", 
-            "Preço Atual (R$)", 
-            "Custo Total Investido (R$)", 
-            "Valor Atualizado (R$)", 
-            "Lucro/Prejuízo (R$)", 
-            "Rentabilidade (%)", 
-            "DY 12m (%)", 
-            "Soma Acumulada (R$)"
-        ]
-
-        df_tabela = df_final[colunas_exibicao].copy()
-
-        # Função de estilo corrigida (cria a matriz com as mesmas colunas de df_tabela)
-        def aplicar_estilo_pontual(data_frame_exibicao):
-            estilos = pd.DataFrame("", index=data_frame_exibicao.index, columns=data_frame_exibicao.columns)
-            css_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
+            # ==============================================================================
+            # SELEÇÃO: Ordena por DY CRESCENTE -> Soma acumulada até o teto
+            # ==============================================================================
+            df_crescente = df_base.sort_values(by="DY 12m (%)", ascending=True).reset_index(drop=True)
             
-            for idx, row in df_final.iterrows():
-                if row["E_Vermelho"]:
-                    if "Ticker" in estilos.columns:
-                        estilos.loc[idx, "Ticker"] = css_vermelho
-                    if "DY 12m (%)" in estilos.columns:
-                        estilos.loc[idx, "DY 12m (%)"] = css_vermelho
+            # Soma acumulada considerando o valor atualizado dos ativos
+            df_crescente["Soma Acumulada (R$)"] = df_crescente["Valor Atualizado (R$)"].cumsum()
+            df_crescente["Soma Acumulada Anterior"] = df_crescente["Soma Acumulada (R$)"].shift(1, fill_value=0.0)
 
-            return estilos
+            # O ativo é 'Vermelho' (para a Entrada) se a soma anterior ainda não atingiu o valor da entrada
+            df_crescente["E_Vermelho"] = df_crescente["Soma Acumulada Anterior"] < valor_entrada
 
-        df_estilizado = (
-            df_tabela
-            .style
-            .apply(lambda _: aplicar_estilo_pontual(df_tabela), axis=None)
-            .format({
-                "Quantidade": "{:,.0f}",
-                "Preço Médio (R$)": "R$ {:,.2f}",
-                "Preço Atual (R$)": "R$ {:,.2f}",
-                "Custo Total Investido (R$)": "R$ {:,.2f}",
-                "Valor Atualizado (R$)": "R$ {:,.2f}",
-                "Lucro/Prejuízo (R$)": "R$ {:,.2f}",
-                "Rentabilidade (%)": "{:+.2f}%",
-                "DY 12m (%)": "{:.2f}%",
-                "Soma Acumulada (R$)": "R$ {:,.2f}"
-            }, na_rep="-")
-        )
+            # ==============================================================================
+            # EXIBIÇÃO: Reordena por DY DECRESCENTE (Vermelhos vão para o final)
+            # ==============================================================================
+            df_final = df_crescente.sort_values(by="DY 12m (%)", ascending=False).reset_index(drop=True)
 
-        st.dataframe(
-            df_estilizado,
-            use_container_width=True,
-            height=500
-        )
+            # RESUMO EXECUTIVO (CARDS DE METRICAS)
+            patrimonio_total = df_final["Valor Atualizado (R$)"].sum()
+            custo_total_carteira = df_final["Custo Total Investido (R$)"].sum()
+            lucro_total = patrimonio_total - custo_total_carteira
+            rentabilidade_geral = ((patrimonio_total / custo_total_carteira) - 1) * 100 if custo_total_carteira > 0 else 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Patrimônio Atual", f"R$ {patrimonio_total:,.2f}")
+            c2.metric("Custo Total Investido", f"R$ {custo_total_carteira:,.2f}")
+            c3.metric("Lucro / Prejuízo Total", f"R$ {lucro_total:,.2f}", delta=f"{lucro_total:,.2f}")
+            c4.metric("Rentabilidade da Carteira", f"{rentabilidade_geral:+.2f}%")
+
+            st.markdown("---")
+
+            # GRÁFICOS
+            g1, g2 = st.columns(2)
+
+            with g1:
+                fig_pie = px.pie(
+                    df_final, 
+                    values="Valor Atualizado (R$)", 
+                    names="Ticker", 
+                    title="<b>Alocação por Ativo</b>",
+                    hole=0.4
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            with g2:
+                fig_bar = px.bar(
+                    df_final.sort_values(by="Lucro/Prejuízo (R$)", ascending=True), 
+                    x="Lucro/Prejuízo (R$)", 
+                    y="Ticker", 
+                    orientation="h",
+                    title="<b>Lucro / Prejuízo Acumulado por Ativo (R$)</b>",
+                    color="Lucro/Prejuízo (R$)",
+                    color_continuous_scale="RdYlGn"
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+            # TABELA DETALHADA COM HIGHLIGHT PONTUAL (TICKER + DY)
+            st.subheader("📋 Tabela Detalhada de Posições (Ordenada por DY Decrescente)")
+            st.markdown(
+                f"*Os ativos selecionados pelos piores DYs para cobrir a entrada de **R$ {valor_entrada:,.2f}** "
+                f"estão destacados em **vermelho** nas colunas **Ticker** e **DY 12m (%)** ao final da tabela.*"
+            )
+
+            # Seleção de colunas para exibição na tela
+            colunas_exibicao = [
+                "Ticker", 
+                "Data 1ª Aquisição", 
+                "Quantidade", 
+                "Preço Médio (R$)", 
+                "Preço Atual (R$)", 
+                "Custo Total Investido (R$)", 
+                "Valor Atualizado (R$)", 
+                "Lucro/Prejuízo (R$)", 
+                "Rentabilidade (%)", 
+                "DY 12m (%)", 
+                "Soma Acumulada (R$)"
+            ]
+
+            df_tabela = df_final[colunas_exibicao].copy()
+
+            # Função de estilo corrigida (cria a matriz com as mesmas colunas de df_tabela)
+            def aplicar_estilo_pontual(data_frame_exibicao):
+                estilos = pd.DataFrame("", index=data_frame_exibicao.index, columns=data_frame_exibicao.columns)
+                css_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
+                
+                for idx, row in df_final.iterrows():
+                    if row["E_Vermelho"]:
+                        if "Ticker" in estilos.columns:
+                            estilos.loc[idx, "Ticker"] = css_vermelho
+                        if "DY 12m (%)" in estilos.columns:
+                            estilos.loc[idx, "DY 12m (%)"] = css_vermelho
+
+                return estilos
+
+            df_estilizado = (
+                df_tabela
+                .style
+                .apply(lambda _: aplicar_estilo_pontual(df_tabela), axis=None)
+                .format({
+                    "Quantidade": "{:,.0f}",
+                    "Preço Médio (R$)": "R$ {:,.2f}",
+                    "Preço Atual (R$)": "R$ {:,.2f}",
+                    "Custo Total Investido (R$)": "R$ {:,.2f}",
+                    "Valor Atualizado (R$)": "R$ {:,.2f}",
+                    "Lucro/Prejuízo (R$)": "R$ {:,.2f}",
+                    "Rentabilidade (%)": "{:+.2f}%",
+                    "DY 12m (%)": "{:.2f}%",
+                    "Soma Acumulada (R$)": "R$ {:,.2f}"
+                }, na_rep="-")
+            )
+
+            st.dataframe(
+                df_estilizado,
+                use_container_width=True,
+                height=500
+            )
 
 else:
     st.info("👆 Por favor, envie a planilha de Movimentações (`.xlsx`) da B3 na barra lateral para carregar a análise.")
