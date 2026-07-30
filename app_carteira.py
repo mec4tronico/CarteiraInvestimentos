@@ -453,6 +453,11 @@ if arquivo_upload is not None:
                     "Lucro",
                     "Prejuízo",
                 )
+                df_grafico_geral["Cor da Barra"] = np.where(
+                    df_grafico_geral["Situação"] == "Lucro",
+                    "#16A34A",
+                    "#DC2626",
+                )
                 df_grafico_geral["Ativo / Resultado"] = df_grafico_geral.apply(
                     lambda row: (
                         f"<span style='color: {'#2563EB' if row['Tipo'] == 'Ação' else '#EA580C'}'>"
@@ -466,11 +471,13 @@ if arquivo_upload is not None:
                     x="Ativo / Resultado",
                     y="Valor Atualizado (R$)",
                     title="<b>Valor Atual de Todos os Ativos (R$)</b>",
-                    color="Situação",
-                    color_discrete_map={"Lucro": "#16A34A", "Prejuízo": "#DC2626"},
                     text="Valor Atualizado (R$)",
+                    category_orders={
+                        "Ativo / Resultado": df_grafico_geral["Ativo / Resultado"].tolist()
+                    },
                 )
                 fig_valor_total.update_traces(
+                    marker_color=df_grafico_geral["Cor da Barra"].tolist(),
                     texttemplate="R$ %{text:,.0f}",
                     textposition="outside",
                 )
