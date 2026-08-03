@@ -5,8 +5,11 @@ Ajustado com reordenação personalizada de colunas e regras de custódia B3.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import time
 from datetime import datetime
+from urllib.parse import urlencode
+from urllib.request import urlopen
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -81,6 +84,44 @@ def classificar_tipo_ativo(produto) -> str:
     ):
         return "FII"
     return "Ação"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def buscar_cdi_diario(data_inicial: str, data_final: str) -> pd.Series:
+    """Busca o CDI diário (série 12) no Banco Central do Brasil."""
+    parametros = urlencode({
+        'formato': 'json',
+        'dataInicial': data_inicial,
+        'dataFinal': data_final,
+    })
+    url = f'https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?{parametros}'
+
+    try:
+        with urlopen(url, timeout=15) as resposta:
+            dados = json.load(resposta)
+        df_cdi = pd.DataFrame(dados)
+        df_cdi['data'] = pd.to_datetime(df_cdi['data'], format='%d/%m/%Y')
+        df_cdi['valor'] = pd.to_numeric(
+            df_cdi['valor'].astype(str).str.replace(',', '.', regex=False),
+            errors='coerce'
+        )
+        return df_cdi.dropna().set_index('data')['valor'].sort_index()
+    except Exception:
+        # Sem CDI, o dashboard continua disponível e mostra '-' nas colunas.
+        return pd.Series(dtype=float)
+
+
+def calcular_valor_equivalente_cdi(aportes: list, cdi_diario: pd.Series) -> float:
+    """Capitaliza cada aporte remanescente pelo CDI diário até a data atual."""
+    if not aportes or cdi_diario.empty:
+        return np.nan
+
+    valor_equivalente = 0.0
+    for aporte in aportes:
+        taxas = cdi_diario[cdi_diario.index >= aporte['data']]
+        fator = (1 + taxas / 100).prod()
+        valor_equivalente += aporte['valor'] * fator
+    return valor_equivalente
 
 
 @st.cache_data(ttl=1800)
@@ -179,6 +220,8 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
                 # A lista IFIX identifica os FIIs mais líquidos, sem confundir
                 # Units e ETFs terminados em 11 com fundos imobiliários.
                 'tipo_ativo': classificar_tipo_ativo(row['Produto']),
+                # Aportes ainda presentes na posição, para o benchmark CDI.
+                'aportes': [],
             }
 
         # Identifica se é Entrada/Compra com valor financeiro.
@@ -193,19 +236,51 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
 
             posicoes[ticker]['quantidade'] += qtd
             posicoes[ticker]['custo_total'] += valor_op
+            posicoes[ticker]['aportes'].append({
+                'data': data_op.normalize(),
+                'quantidade': qtd,
+                'valor': valor_op,
+            })
 
             if posicoes[ticker]['primeira_compra'] is None:
                 posicoes[ticker]['primeira_compra'] = data_op
 
         elif is_venda and posicoes[ticker]['quantidade'] > 0:
+            quantidade_anterior = posicoes[ticker]['quantidade']
             pm = posicoes[ticker]['custo_total'] / posicoes[ticker]['quantidade']
-            posicoes[ticker]['quantidade'] = max(0.0, posicoes[ticker]['quantidade'] - qtd)
+            quantidade_vendida = min(qtd, quantidade_anterior)
+            fator_remanescente = 1 - (quantidade_vendida / quantidade_anterior)
+            posicoes[ticker]['quantidade'] = max(0.0, quantidade_anterior - qtd)
             posicoes[ticker]['custo_total'] = posicoes[ticker]['quantidade'] * pm
+
+            # Como o preço médio já é usado no saldo da aplicação, a venda reduz
+            # proporcionalmente os aportes que permanecem no benchmark CDI.
+            for aporte in posicoes[ticker]['aportes']:
+                aporte['quantidade'] *= fator_remanescente
+                aporte['valor'] *= fator_remanescente
+            posicoes[ticker]['aportes'] = [
+                aporte for aporte in posicoes[ticker]['aportes']
+                if aporte['quantidade'] > 0
+            ]
 
             # Uma venda/transferência de liquidação que zera a posição encerra o lote.
             # A próxima entrada passa a ter sua própria data de aquisição.
             if posicoes[ticker]['quantidade'] == 0:
                 posicoes[ticker]['primeira_compra'] = None
+
+    data_final = pd.Timestamp.today().normalize()
+    datas_aportes = [
+        aporte['data']
+        for posicao in posicoes.values()
+        for aporte in posicao['aportes']
+    ]
+    if datas_aportes:
+        cdi_diario = buscar_cdi_diario(
+            min(datas_aportes).strftime('%d/%m/%Y'),
+            data_final.strftime('%d/%m/%Y')
+        )
+    else:
+        cdi_diario = pd.Series(dtype=float)
 
     # ==============================================================================
     # AUDITORIA DE SALDO: TOLERÂNCIA DE QUANTIDADE > 5
@@ -220,6 +295,9 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
                 'quantidade': p['quantidade'],
                 'preco_medio': pm,
                 'custo_total': p['custo_total'],
+                'valor_equivalente_cdi': calcular_valor_equivalente_cdi(
+                    p['aportes'], cdi_diario
+                ),
                 'data_aquisicao': data_exibicao,
                 'tipo_ativo': p['tipo_ativo'],
             })
@@ -377,7 +455,8 @@ def exibir_painel_categoria(df_painel: pd.DataFrame, titulo: str, teto_vermelho:
 
     colunas_exibicao = [
         "Ticker", "DY 12m (%)", "Valor Atualizado (R$)", "Lucro/Prejuízo (R$)",
-        "Rentabilidade (%)", "Data 1ª Aquisição", "Quantidade", "Preço Médio (R$)",
+        "Rentabilidade (%)", "Diferença vs. CDI (R$)", "Acima/Abaixo do CDI (%)",
+        "Data 1ª Aquisição", "Quantidade", "Preço Médio (R$)",
         "Preço Atual (R$)", "Custo Total Investido (R$)", "Soma Acumulada (R$)"
     ]
     df_tabela = df_painel[colunas_exibicao].copy()
@@ -399,6 +478,8 @@ def exibir_painel_categoria(df_painel: pd.DataFrame, titulo: str, teto_vermelho:
             "Valor Atualizado (R$)": "R$ {:,.2f}",
             "Lucro/Prejuízo (R$)": "R$ {:,.2f}",
             "Rentabilidade (%)": "{:+.2f}%",
+            "Diferença vs. CDI (R$)": "R$ {:+,.2f}",
+            "Acima/Abaixo do CDI (%)": "{:+.2f}%",
             "Quantidade": "{:,.0f}",
             "Preço Médio (R$)": "R$ {:,.2f}",
             "Preço Atual (R$)": "R$ {:,.2f}",
@@ -467,6 +548,15 @@ if arquivo_upload is not None:
             # CÁLCULO DE LUCRO/PREJUÍZO REFERENTE ÀS DATAS DE COMPRA
             lucro_prejuizo = val_atualizado - custo_total
             rentabilidade_pct = ((preco_atual / pm) - 1) * 100 if pm > 0 else 0
+            valor_equivalente_cdi = row["valor_equivalente_cdi"]
+            diferenca_cdi = (
+                val_atualizado - valor_equivalente_cdi
+                if pd.notna(valor_equivalente_cdi) else np.nan
+            )
+            rentabilidade_vs_cdi = (
+                ((val_atualizado / valor_equivalente_cdi) - 1) * 100
+                if pd.notna(valor_equivalente_cdi) and valor_equivalente_cdi > 0 else np.nan
+            )
 
             dados_completos.append({
                 "Ticker": ticker,
@@ -475,6 +565,8 @@ if arquivo_upload is not None:
                 "Valor Atualizado (R$)": val_atualizado,
                 "Lucro/Prejuízo (R$)": lucro_prejuizo,
                 "Rentabilidade (%)": rentabilidade_pct,
+                "Diferença vs. CDI (R$)": diferenca_cdi,
+                "Acima/Abaixo do CDI (%)": rentabilidade_vs_cdi,
                 "Data 1ª Aquisição": data_acq,
                 "Quantidade": qtd,
                 "Preço Médio (R$)": pm,
