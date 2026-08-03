@@ -83,6 +83,13 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
             'Preço': 'Preço unitário',
             'Valor': 'Valor da Operação',
         })
+        # No relatório de Negociações, o sufixo F identifica operações no
+        # mercado fracionário. Elas pertencem ao mesmo ativo no mercado padrão
+        # (por exemplo, VALE3F e VALE3 são consolidados como VALE3).
+        df['Ticker'] = (
+            df['Ticker'].astype(str).str.strip().str.upper()
+            .str.replace(r'F$', '', regex=True)
+        )
         df['Produto'] = df['Ticker']
         df['Entrada/Saída'] = df['Movimentação'].map({
             'Compra': 'Credito',
