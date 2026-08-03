@@ -47,31 +47,68 @@ def limpar_valor_numerico(val):
         return 0.0
 
 
-def classificar_tipo_ativo(produto) -> str:
+def classificar_tipo_ativo(produto, inferir_fii_por_ticker=False) -> str:
     """Classifica FIIs pela descrição oficial da B3; os demais são ações."""
     descricao = str(produto).upper()
-    if "FII" in descricao or "FUNDO DE INVESTIMENTO IMOBILI" in descricao:
+    if (
+        "FII" in descricao
+        or "FUNDO DE INVESTIMENTO IMOBILI" in descricao
+        or (inferir_fii_por_ticker and descricao.endswith("11"))
+    ):
         return "FII"
     return "Ação"
 
 
 @st.cache_data(ttl=1800)
 def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
-    """Processa o Extrato de Movimentações da B3, auditando e aplicando a
-    tolerância mínima de quantidade (> 5 cotas/ações).
+    """Processa os extratos de Movimentações ou Negociações da B3.
+
+    A B3 usa nomes de colunas distintos nos dois relatórios. Ambos são
+    convertidos para um formato interno único antes do cálculo das posições.
     """
     df = pd.read_excel(file_bytes)
 
+    colunas_negociacoes = {
+        'Data do Negócio', 'Tipo de Movimentação', 'Código de Negociação',
+        'Quantidade', 'Preço', 'Valor'
+    }
+    eh_relatorio_negociacoes = colunas_negociacoes.issubset(df.columns)
+
+    if eh_relatorio_negociacoes:
+        # Relatório B3 "Negociações": cada linha já representa uma compra ou venda.
+        df = df.rename(columns={
+            'Data do Negócio': 'Data',
+            'Tipo de Movimentação': 'Movimentação',
+            'Código de Negociação': 'Ticker',
+            'Preço': 'Preço unitário',
+            'Valor': 'Valor da Operação',
+        })
+        df['Produto'] = df['Ticker']
+        df['Entrada/Saída'] = df['Movimentação'].map({
+            'Compra': 'Credito',
+            'Venda': 'Debito',
+        }).fillna('')
+    else:
+        colunas_movimentacoes = {
+            'Data', 'Movimentação', 'Entrada/Saída', 'Produto', 'Quantidade',
+            'Preço unitário', 'Valor da Operação'
+        }
+        faltantes = colunas_movimentacoes - set(df.columns)
+        if faltantes:
+            raise ValueError(
+                'Formato de planilha B3 não reconhecido. Colunas ausentes: '
+                + ', '.join(sorted(faltantes))
+            )
+        # Extrato de Movimentações: o código vem no início da descrição do produto.
+        df['Ticker'] = df['Produto'].astype(str).str.split('-').str[0].str.strip()
+
     # Ordena cronologicamente (da movimentação mais antiga para a mais recente)
-    df['Data_dt'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
+    df['Data_dt'] = pd.to_datetime(df['Data'], dayfirst=True, errors='coerce')
     df = df.sort_values(by='Data_dt', ascending=True)
 
     df['Quantidade_num'] = df['Quantidade'].apply(limpar_valor_numerico)
     df['Valor_num'] = df['Valor da Operação'].apply(limpar_valor_numerico)
     df['Preco_num'] = df['Preço unitário'].apply(limpar_valor_numerico)
-
-    # Extrai o Ticker do produto
-    df['Ticker'] = df['Produto'].astype(str).str.split('-').str[0].str.strip()
 
     # Mapeamento e substituição de tickers antigos (Ex: ELET3 -> AXIA3)
     df['Ticker'] = df['Ticker'].replace(TICKER_MAP)
@@ -108,10 +145,15 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
                 # Isso evita que eventos anteriores (ou uma posição já encerrada)
                 # contaminem a data de aquisição do lote atual.
                 'primeira_compra': None,
-                'tipo_ativo': classificar_tipo_ativo(row['Produto']),
+                # O relatório de Negociações não traz a descrição do produto.
+                # Para ele, usa-se o sufixo 11 como heurística de FII.
+                'tipo_ativo': classificar_tipo_ativo(
+                    row['Produto'], inferir_fii_por_ticker=eh_relatorio_negociacoes
+                ),
             }
 
-        # Identifica se é Entrada/Compra com valor financeiro
+        # Identifica se é Entrada/Compra com valor financeiro.
+        # No relatório de Negociações, Compra/Venda são informados diretamente.
         is_compra = (mov in eventos_compra and tipo == 'Credito')
         # Identifica se é Saída/Venda
         is_venda = (mov == 'Venda' or (mov == 'Transferência - Liquidação' and tipo == 'Debito'))
@@ -340,10 +382,13 @@ def exibir_painel_categoria(df_painel: pd.DataFrame, titulo: str, teto_vermelho:
 
 # INTERFACE DO STREAMLIT
 st.title("📊 Dashboard da Carteira B3")
-st.markdown("Análise consolidada do Extrato Oficial de Movimentações da B3.")
+st.markdown("Análise consolidada dos extratos oficiais de Movimentações e Negociações da B3.")
 
 st.sidebar.header("📂 Importação de Dados")
-arquivo_upload = st.sidebar.file_uploader("Envie a planilha `.xlsx` da B3", type=["xlsx"])
+arquivo_upload = st.sidebar.file_uploader(
+    "Envie a planilha `.xlsx` da B3 (Movimentações ou Negociações)",
+    type=["xlsx"]
+)
 
 # Configuração dos tetos de destaque na Sidebar
 st.sidebar.header("🔴 Tetos para Destaque em Vermelho")
@@ -501,4 +546,4 @@ if arquivo_upload is not None:
                 )
 
 else:
-    st.info("👆 Por favor, envie a planilha de Movimentações (`.xlsx`) da B3 na barra lateral para carregar a análise.")
+    st.info("👆 Envie uma planilha de Movimentações ou Negociações (`.xlsx`) da B3 na barra lateral para carregar a análise.")
