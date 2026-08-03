@@ -30,6 +30,29 @@ TICKER_MAP = {
     # Adicione novos de-para aqui caso outros ativos mudem de código
 }
 
+# Componentes do IFIX em 01/08/2026. A composição é revisada
+# quadrimestralmente; atualize esta lista após cada revisão da B3.
+# Ativos fora desta lista são tratados como Ação, evitando que Units e ETFs
+# terminados em 11 (como SANB11 e BOVA11) sejam classificados como FIIs.
+TICKERS_FII_IFIX = {
+    'AFHI11', 'ALZR11', 'AZPL11', 'BBIG11', 'BCRI11', 'BCIA11', 'BPML11',
+    'BRCO11', 'BRCR11', 'BROF11', 'BTAL11', 'BTLG11', 'BTHF11', 'BTCI11',
+    'CACR11', 'CLIN11', 'CPSH11', 'CPTS11', 'CYCR11', 'DEVA11', 'FATN11',
+    'GARE11', 'GGRC11', 'GTWR11', 'GZIT11', 'HABT11', 'HCTR11', 'HFOF11',
+    'HGBS11', 'HGCR11', 'HGRE11', 'HGLG11', 'HGRU11', 'HSAF11', 'HSLG11',
+    'HSML11', 'HTMX11', 'ICRI11', 'IRIM11', 'ITRI11', 'JSAF11', 'JSRE11',
+    'KCRE11', 'KFOF11', 'KISU11', 'KIVO11', 'KNCR11', 'KNHF11', 'KNHY11',
+    'KNIP11', 'KNRI11', 'KNSC11', 'KNUQ11', 'KORE11', 'LIFE11', 'LVBI11',
+    'MANA11', 'MCCI11', 'MCRE11', 'MFII11', 'MXRF11', 'OUJP11', 'PCIP11',
+    'PMLL11', 'PORD11', 'PSEC11', 'PVBI11', 'RBFM11', 'RBRL11', 'RBRP11',
+    'RBRR11', 'RBRX11', 'RBRY11', 'RBVA11', 'RCRB11', 'RECR11', 'RPRI11',
+    'RZAK11',
+    'RZAT11', 'RZTR11', 'SNCI11', 'SNEL11', 'SNFF11', 'SPXS11', 'TEPP11',
+    'TGAR11', 'TOPP11', 'TRBL11', 'TRXF11', 'TVRI11', 'URPR11', 'VCJR11',
+    'VGHF11', 'VGIP11', 'VGIR11', 'VGRI11', 'VILG11', 'VINO11', 'VISC11',
+    'VRTA11', 'VRTM11', 'WHGR11', 'XPCI11', 'XPLG11', 'XPSF11', 'XPML11',
+}
+
 # Tolerância Mínima: Ativos com quantidade <= QTD_MINIMA_TOLERANCIA serão descartados
 QTD_MINIMA_TOLERANCIA = 5.0
 
@@ -47,13 +70,14 @@ def limpar_valor_numerico(val):
         return 0.0
 
 
-def classificar_tipo_ativo(produto, inferir_fii_por_ticker=False) -> str:
-    """Classifica FIIs pela descrição oficial da B3; os demais são ações."""
+def classificar_tipo_ativo(produto) -> str:
+    """Classifica FIIs pela descrição B3 ou pela composição local do IFIX."""
     descricao = str(produto).upper()
+    ticker = descricao.split('-')[0].strip()
     if (
-        "FII" in descricao
+        ticker in TICKERS_FII_IFIX
+        or "FII" in descricao
         or "FUNDO DE INVESTIMENTO IMOBILI" in descricao
-        or (inferir_fii_por_ticker and descricao.endswith("11"))
     ):
         return "FII"
     return "Ação"
@@ -152,11 +176,9 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
                 # Isso evita que eventos anteriores (ou uma posição já encerrada)
                 # contaminem a data de aquisição do lote atual.
                 'primeira_compra': None,
-                # O relatório de Negociações não traz a descrição do produto.
-                # Para ele, usa-se o sufixo 11 como heurística de FII.
-                'tipo_ativo': classificar_tipo_ativo(
-                    row['Produto'], inferir_fii_por_ticker=eh_relatorio_negociacoes
-                ),
+                # A lista IFIX identifica os FIIs mais líquidos, sem confundir
+                # Units e ETFs terminados em 11 com fundos imobiliários.
+                'tipo_ativo': classificar_tipo_ativo(row['Produto']),
             }
 
         # Identifica se é Entrada/Compra com valor financeiro.
