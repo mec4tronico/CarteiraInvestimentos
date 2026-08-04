@@ -1,4 +1,5 @@
 """app_carteira.py
+# Teste de edição - Comentário inserido com sucesso!
 
 Dashboard Interativo da Carteira de Investimentos
 Ajustado com reordenação personalizada de colunas e regras de custódia B3.
@@ -73,16 +74,16 @@ def limpar_valor_numerico(val):
         return 0.0
 
 
-def classificar_tipo_ativo(produto) -> str:
-    """Classifica FIIs pela descrição B3 ou pela composição local do IFIX."""
+def classificar_tipo_ativo(produto, ticker) -> str:
+    """Classifica ativos. Se termina em 11 e não for FII, é Unit (Ação)."""
     descricao = str(produto).upper()
-    ticker = descricao.split('-')[0].strip()
-    if (
-        ticker in TICKERS_FII_IFIX
-        or "FII" in descricao
-        or "FUNDO DE INVESTIMENTO IMOBILI" in descricao
-    ):
+    ticker = str(ticker).upper().strip()
+    
+    # É FII se estiver na lista IFIX ou tiver "FII" na descrição
+    if ticker in TICKERS_FII_IFIX or "FII" in descricao or "IMOBILIARIO" in descricao:
         return "FII"
+    
+    # Se termina em 11 e não caiu na regra acima, é Unit de Ação (Ex: SAPR11)
     return "Ação"
 
 
@@ -219,7 +220,7 @@ def processar_movimentacoes_b3(file_bytes) -> pd.DataFrame:
                 'primeira_compra': None,
                 # A lista IFIX identifica os FIIs mais líquidos, sem confundir
                 # Units e ETFs terminados em 11 com fundos imobiliários.
-                'tipo_ativo': classificar_tipo_ativo(row['Produto']),
+                'tipo_ativo': classificar_tipo_ativo(row['Produto'], ticker),
                 # Aportes ainda presentes na posição, para o benchmark CDI.
                 'aportes': [],
             }
@@ -389,7 +390,11 @@ def exibir_painel_categoria(df_painel: pd.DataFrame, titulo: str, teto_vermelho:
         st.info(f"Não há ativos classificados como {titulo.lower()}.")
         return
 
+    # Adicionando a coluna 'Trend' logo após o Ticker
+    df_painel['Trend'] = df_painel['Diferença vs. CDI (R$)'].apply(lambda x: "▲" if x > 0 else "▼")
+
     df_painel = df_painel.sort_values(by="DY 12m (%)", ascending=False).reset_index(drop=True)
+    # ... resto do código ...
     patrimonio = df_painel["Valor Atualizado (R$)"].sum()
     custo_total = df_painel["Custo Total Investido (R$)"].sum()
     lucro_total = patrimonio - custo_total
@@ -454,7 +459,7 @@ def exibir_painel_categoria(df_painel: pd.DataFrame, titulo: str, teto_vermelho:
     )
 
     colunas_exibicao = [
-        "Ticker", "DY 12m (%)", "Valor Atualizado (R$)", "Lucro/Prejuízo (R$)",
+        "Ticker", "Trend", "DY 12m (%)", "Valor Atualizado (R$)", "Lucro/Prejuízo (R$)",
         "Rentabilidade (%)", "Diferença vs. CDI (R$)", "Acima/Abaixo do CDI (%)",
         "Data 1ª Aquisição", "Quantidade", "Preço Médio (R$)",
         "Preço Atual (R$)", "Custo Total Investido (R$)", "Soma Acumulada (R$)"
@@ -463,11 +468,31 @@ def exibir_painel_categoria(df_painel: pd.DataFrame, titulo: str, teto_vermelho:
 
     def aplicar_estilo_pontual(data_frame_exibicao):
         estilos = pd.DataFrame("", index=data_frame_exibicao.index, columns=data_frame_exibicao.columns)
-        css_vermelho = "color: #991B1B; background-color: #FEE2E2; font-weight: bold;"
+        
+        # Estilos baseados no teto vermelho
+        css_vermelho_forte = "color: white; background-color: #ef4444; font-weight: bold;"
+        
+        # Perfumaria CDI: Verde para positivo, Vermelho para negativo
+        css_verde_cdi = "color: #15803d; background-color: #dcfce7; font-weight: bold;"
+        css_vermelho_cdi = "color: #b91c1c; background-color: #fee2e2; font-weight: bold;"
+
         for idx, row in df_painel.iterrows():
+            # Destaque de Teto Vermelho (Ticker e DY)
             if row["E_Vermelho"]:
-                estilos.loc[idx, "Ticker"] = css_vermelho
-                estilos.loc[idx, "DY 12m (%)"] = css_vermelho
+                estilos.loc[idx, "Ticker"] = css_vermelho_forte
+                estilos.loc[idx, "DY 12m (%)"] = css_vermelho_forte
+            
+            # Perfumaria CDI (Setas e Performance)
+            # COMENTÁRIO: Aqui começa a lógica de cores Verde/Vermelha para o CDI
+            if row["Diferença vs. CDI (R$)"] > 0:
+                estilos.loc[idx, "Trend"] = "color: #15803d; font-weight: bold;"
+                estilos.loc[idx, "Diferença vs. CDI (R$)"] = css_verde_cdi
+                estilos.loc[idx, "Acima/Abaixo do CDI (%)"] = css_verde_cdi
+            else:
+                estilos.loc[idx, "Trend"] = "color: #b91c1c; font-weight: bold;"
+                estilos.loc[idx, "Diferença vs. CDI (R$)"] = css_vermelho_cdi
+                estilos.loc[idx, "Acima/Abaixo do CDI (%)"] = css_vermelho_cdi
+        
         return estilos
 
     df_estilizado = (
@@ -572,6 +597,7 @@ if arquivo_upload is not None:
                 "Preço Médio (R$)": pm,
                 "Preço Atual (R$)": preco_atual,
                 "Custo Total Investido (R$)": custo_total,
+                "valor_equivalente_cdi": row["valor_equivalente_cdi"] # Necessário para cálculos posteriores
             })
 
         df_base = pd.DataFrame(dados_completos)
