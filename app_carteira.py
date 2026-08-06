@@ -222,7 +222,18 @@ def importar_e_atualizar(file_bytes):
 # Funções de dados / cotações (mantidas e corrigidas)
 # =============================================================================
 def buscar_dados_yfinance(ticker_b3: str) -> dict:
-    """Busca cotações atuais e métricas via Yahoo Finance para ativos da B3."""
+    """Busca cotações atuais e métricas via Yahoo Finance para ativos da B3.
+
+    Calcula DY 12m como soma dos dividendos pagos nos últimos 365 dias
+    dividido pelo preço atual do ativo.
+
+    Retorna dicionário com:
+      - ticker
+      - preco_atual (float ou None)
+      - dy (percentual, float)
+      - hist (DataFrame histórico obtido)
+      - needs_fii_div_source (bool): True quando é FII e o Yahoo não retornou dividendos
+    """
     symbol = f"{ticker_b3}.SA" if not ticker_b3.endswith('.SA') else ticker_b3
     yticker = yf.Ticker(symbol)
 
@@ -231,42 +242,67 @@ def buscar_dados_yfinance(ticker_b3: str) -> dict:
     except Exception:
         info = {}
 
+    hist = pd.DataFrame()
     try:
-        hist = yticker.history(period="1mo")
+        # Buscar alguns dias para garantir preço de fechamento recente
+        hist = yticker.history(period="5d", interval="1d", actions=True)
     except Exception:
         hist = pd.DataFrame()
 
-    preco_atual = info.get('regularMarketPrice') or info.get('currentPrice') or info.get('previousClose')
+    # Determina preço atual preferindo campos de info e caindo para o fechamento histórico
+    preco_atual = None
+    try:
+        preco_atual = info.get('regularMarketPrice') or info.get('currentPrice') or info.get('previousClose')
+    except Exception:
+        preco_atual = None
+
     if (preco_atual is None or preco_atual == 0) and not hist.empty:
+        # tenta usar o último fechamento disponível
         try:
-            preco_atual = float(hist['Close'].iloc[-1])
+            if 'Close' in hist.columns:
+                preco_atual = float(hist['Close'].dropna().iloc[-1])
+            elif 'close' in hist.columns:
+                preco_atual = float(hist['close'].dropna().iloc[-1])
         except Exception:
             preco_atual = None
 
     dy = None
+    needs_fii_div_source = False
     try:
         dividends = yticker.dividends
-        if dividends is not None and not dividends.empty and preco_atual and preco_atual > 0:
-            um_ano_atras = pd.Timestamp.now() - pd.Timedelta(days=365)
+        if dividends is None:
+            dividends = pd.Series(dtype=float)
+
+        um_ano_atras = pd.Timestamp.now() - pd.Timedelta(days=365)
+        # Soma dividendos dos últimos 365 dias
+        if not dividends.empty and preco_atual and preco_atual > 0:
             divs_12m = dividends[dividends.index >= um_ano_atras].sum()
             dy = (divs_12m / preco_atual) * 100
+
+        # Se for FII e não houver dividendos retornados pelo Yahoo, sinalizar para possível fonte alternativa
+        if (ticker_b3.endswith('11') or ticker_b3 in TICKERS_FII_IFIX) and (dividends is None or dividends.empty):
+            needs_fii_div_source = True
     except Exception:
         dy = None
 
-    if dy is None or dy == 0:
+    # Fallback: usar dividendYield do info (quando disponível) — cuidado pois pode ser baseado em outra cotação
+    if dy is None or pd.isna(dy) or dy == 0:
         dy_raw = info.get('dividendYield') or info.get('trailingAnnualDividendYield')
         if dy_raw is not None:
             try:
-                # dy_raw pode já estar em % (5.0) ou decimal (0.05)
                 dy = float(dy_raw) * 100 if float(dy_raw) < 1 else float(dy_raw)
             except Exception:
                 dy = None
 
+    if dy is None or pd.isna(dy):
+        dy = 0.0
+
     return {
         'ticker': ticker_b3,
         'preco_atual': preco_atual,
-        'dy': dy if dy is not None else 0.0,
+        'dy': dy,
         'hist': hist,
+        'needs_fii_div_source': needs_fii_div_source,
     }
 
 
