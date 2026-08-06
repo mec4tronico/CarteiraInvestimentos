@@ -30,47 +30,60 @@ def fechar_conexao(conn: sqlite3.Connection):
 
 
 def inicializar_banco():
-    """Cria as tabelas necessárias se elas não existirem."""
-    conn = conectar_banco()
-    cursor = conn.cursor()
+    """Cria as tabelas necessárias se elas não existirem.
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS operacoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            data DATE,
-            ticker TEXT,
-            tipo_ativo TEXT,
-            movimentacao TEXT,
-            entrada_saida TEXT,
-            quantidade REAL,
-            preco_unitario REAL,
-            valor_total REAL,
-            numero_operacao TEXT,
-            corretora TEXT,
-            hash_operacao TEXT UNIQUE
-        )
-    ''')
+    Esta função é segura para chamadas repetidas — cria a estrutura do DB
+    caso ainda não exista.
+    """
+    try:
+        conn = conectar_banco()
+        cursor = conn.cursor()
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS carteira (
-            ticker TEXT PRIMARY KEY,
-            tipo_ativo TEXT,
-            quantidade REAL,
-            preco_medio REAL,
-            valor_investido REAL,
-            data_primeira_compra DATE,
-            valor_equivalente_cdi REAL
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS operacoes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                data DATE,
+                ticker TEXT,
+                tipo_ativo TEXT,
+                movimentacao TEXT,
+                entrada_saida TEXT,
+                quantidade REAL,
+                preco_unitario REAL,
+                valor_total REAL,
+                numero_operacao TEXT,
+                corretora TEXT,
+                hash_operacao TEXT UNIQUE
+            )
+        ''')
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS configuracoes (
-            chave TEXT PRIMARY KEY,
-            valor TEXT
-        )
-    ''')
-    conn.commit()
-    fechar_conexao(conn)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS carteira (
+                ticker TEXT PRIMARY KEY,
+                tipo_ativo TEXT,
+                quantidade REAL,
+                preco_medio REAL,
+                valor_investido REAL,
+                data_primeira_compra DATE,
+                valor_equivalente_cdi REAL
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS configuracoes (
+                chave TEXT PRIMARY KEY,
+                valor TEXT
+            )
+        ''')
+        conn.commit()
+    except Exception:
+        # Não propagar exceção: o app de UI deve continuar a carregar e
+        # mostrar mensagem orientando a importação caso o DB esteja inacessível.
+        pass
+    finally:
+        try:
+            fechar_conexao(conn)
+        except Exception:
+            pass
 
 
 # ---------------------- Funções de leitura/escrita ---------------------------
@@ -317,5 +330,20 @@ def atualizar_carteira() -> int:
     return len(df_resumo)
 
 
+def recalcular_carteira() -> int:
+    """Alias para atualizar_carteira().
+
+    Esta função foi adicionada para cumprir a especificação da migração
+    e fornece um nome semântico claro para o ponto de recálculo da carteira.
+
+    Retorna o número de tickers gravados na tabela `carteira`.
+    """
+    return atualizar_carteira()
+
+
 # Inicializa banco ao importar o módulo (comportamento antigo preservado)
-inicializar_banco()
+try:
+    inicializar_banco()
+except Exception:
+    # Em ambientes restritos, falhas na inicialização não devem quebrar a importação.
+    pass
