@@ -398,11 +398,52 @@ else:
 
     # Gráfico: patrimônio por ativo (mantém visual semelhante ao original)
     st.subheader('Patrimônio por Ativo')
-    fig = px.bar(df_base.sort_values(by='Valor Atualizado (R$)', ascending=False),
-                 x='Ticker', y='Valor Atualizado (R$)', color='Tipo', title='<b>Patrimônio por Ativo</b>')
+
+    # Prepara indicador de lucro/prejuízo para colorir barras
+    df_base['ResultadoLabel'] = df_base['Lucro/Prejuízo (R$)'].apply(lambda x: 'Prejuizo' if x < 0 else 'Lucro')
+    color_map = {'Prejuizo': '#ef4444', 'Lucro': '#10b981'}  # vermelho / verde
+
+    # ordena para plot
+    df_plot = df_base.sort_values(by='Valor Atualizado (R$)', ascending=False).copy()
+
+    fig = px.bar(
+        df_plot,
+        x='Ticker',
+        y='Valor Atualizado (R$)',
+        color='ResultadoLabel',
+        color_discrete_map=color_map,
+        category_orders={'ResultadoLabel': ['Prejuizo', 'Lucro']},
+        title='<b>Patrimônio por Ativo</b>'
+    )
+    fig.update_traces(showlegend=False)
+
+    # Anotações: colorir os nomes dos ativos por tipo (FII = laranja, Ação = azul)
+    type_color_map = {'FII': '#f97316', 'Unit': '#3b82f6', 'Ação': '#3b82f6'}
+    # Esconde labels padrão e usaremos annotations coloridos
+    fig.update_xaxes(showticklabels=False)
+
+    # Ajusta margem inferior para as anotações
+    fig.update_layout(margin=dict(b=140))
+
+    # Adiciona uma annotation por ativo com cor baseada no tipo
+    # Posiciona em yref='paper' para ficar abaixo do eixo
+    for _, r in df_plot.iterrows():
+        tipo = str(r.get('Tipo', '')).strip()
+        color = type_color_map.get(tipo, '#3b82f6')
+        fig.add_annotation(
+            x=r['Ticker'],
+            y=-0.02,
+            xref='x',
+            yref='paper',
+            text=f"{r['Ticker']}",
+            showarrow=False,
+            xanchor='center',
+            font=dict(color=color, size=12, family='Arial')
+        )
+
     st.plotly_chart(fig, use_container_width=True)
 
-    # Limitar colunas exibidas até 'Rentabilidade vs CDI (%)' conforme solicitado
+    # Limitar colunas exibidas até 'Rentabilidade vs CDI (%)' conforme solicitado (mantemos Tipo para lógica, mas o retiramos da exibição)
     display_cols = ['Ticker', 'Tipo', 'DY 12m (%)', 'Valor Atualizado (R$)', 'Lucro/Prejuízo (R$)', 'Rentabilidade (%)', 'Diferença vs. CDI (R$)', 'Rentabilidade vs CDI (%)']
     df_display = df_base[display_cols].copy()
 
@@ -412,11 +453,19 @@ else:
         if c in df_display.columns:
             df_display[c] = pd.to_numeric(df_display[c], errors='coerce').round(2)
 
+    # Ordenar a tabela por DY decrescente (maiores DY em cima)
+    if 'DY 12m (%)' in df_display.columns:
+        df_display = df_display.sort_values(by='DY 12m (%)', ascending=False).reset_index(drop=True)
+
     # Formatação: valores em R$
     currency_cols = ['Valor Atualizado (R$)', 'Lucro/Prejuízo (R$)', 'Diferença vs. CDI (R$)']
     for c in currency_cols:
         if c in df_display.columns:
             df_display[c] = pd.to_numeric(df_display[c], errors='coerce').fillna(0.0)
+
+    # Remover coluna Tipo da exibição conforme solicitado
+    if 'Tipo' in df_display.columns:
+        df_display = df_display.drop(columns=['Tipo'])
 
     # ======================================================================
     # Lógica de marcação em vermelho por DY acumulado até o teto (ações e FIIs)
@@ -440,9 +489,9 @@ else:
             else:
                 break
 
-    # Separa em Ações (treat Unit as action) e FIIs
-    df_actions = df_display[df_display['Tipo'].astype(str).str.upper().str.contains('FII') == False].copy()
-    df_fiis = df_display[df_display['Tipo'].astype(str).str.upper().str.contains('FII')].copy()
+    # Para marcação usamos df_base (que ainda tem 'Tipo')
+    df_actions = df_base[df_base['Tipo'].astype(str).str.upper().str.contains('FII') == False].copy()
+    df_fiis = df_base[df_base['Tipo'].astype(str).str.upper().str.contains('FII')].copy()
 
     try:
         teto_acoes = float(teto_vermelho_acoes or 0)
@@ -491,8 +540,8 @@ else:
 
     styler = styler.format(fmt_map, na_rep='-')
 
-    # Alinhamento à direita para todas as colunas exceto Ticker e Tipo
-    right_align_cols = [c for c in df_display.columns if c not in ['Ticker', 'Tipo']]
+    # Alinhamento à direita para todas as colunas exceto Ticker
+    right_align_cols = [c for c in df_display.columns if c not in ['Ticker']]
     styler = styler.set_properties(**{'text-align': 'right'}, subset=right_align_cols)
 
     # Aplicar destaque vermelho e negrito para Ticker e DY das linhas marcadas
