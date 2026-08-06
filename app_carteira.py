@@ -12,10 +12,6 @@ Comentários importantes:
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from urllib.parse import urlencode
-from urllib.request import urlopen
-import os
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -41,9 +37,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ==============================================================================
+# =============================================================================
 # CONFIGURAÇÕES E CONSTANTES
-# ==============================================================================
+# =============================================================================
 TICKER_MAP = {
     "ELET3": "AXIA3",
     "ELET6": "AXIA6",
@@ -60,10 +56,9 @@ QTD_MINIMA_TOLERANCIA = 5.0
 # Garante inicialização do banco (cria dados/carteira.db e tabelas se necessário)
 inicializar_banco()
 
-# ==============================================================================
+# =============================================================================
 # UTILITÁRIOS (mantidos e corrigidos)
-# ==============================================================================
-
+# =============================================================================
 def limpar_valor_numerico(val):
     """Converte valores no formato B3/Excel para float."""
     if pd.isna(val) or val == "-" or str(val).strip() == "":
@@ -97,9 +92,9 @@ def _ensure_series(df: pd.DataFrame, col: str, default=None) -> pd.Series:
     return pd.Series([default] * len(df), index=df.index)
 
 
-# ==============================================================================
+# =============================================================================
 # Leitura e normalização da planilha B3
-# ==============================================================================
+# =============================================================================
 @st.cache_data(ttl=3600)
 def _ler_planilha_b3(file_bytes) -> pd.DataFrame:
     """Lê e normaliza a planilha B3 para o formato interno de operações.
@@ -148,7 +143,7 @@ def _ler_planilha_b3(file_bytes) -> pd.DataFrame:
 
     # Preço unitário: preferir coluna explícita, senão calcular como Valor / Quantidade
     if 'Preço unitário' in df.columns:
-        df['Preco_num'] = df['Preço unitário'].apply(limpar_valor_numerico)
+        df['Preco_num'] = _ensure_series(df, 'Preço unitário').apply(limpar_valor_numerico)
     else:
         # evita divisão por zero
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -158,9 +153,10 @@ def _ler_planilha_b3(file_bytes) -> pd.DataFrame:
     df['Ticker'] = df['Ticker'].replace(TICKER_MAP)
 
     # Produto / tipo_ativo: usar Produto quando disponível senão fallback para Ticker
-    prod_series = _ensure_series(df, 'Produto', default='')
-    prod_series = prod_series.astype(str) if not prod_series.empty else prod_series
-    df['tipo_ativo'] = prod_series.apply(lambda x: classificar_tipo_ativo(x, x)) if not prod_series.empty else df['Ticker'].apply(lambda x: classificar_tipo_ativo(x, x))
+    prod_series = _ensure_series(df, 'Produto', default='').fillna('').astype(str)
+    tickers_series = df['Ticker'].astype(str).fillna('')
+    # Combina produto e ticker corretamente para classificar
+    df['tipo_ativo'] = [classificar_tipo_ativo(prod, tick) for prod, tick in zip(prod_series, tickers_series)]
 
     # Movimentação e Entrada/Saída como strings
     mov = _ensure_series(df, 'Movimentação', default='')
@@ -184,9 +180,9 @@ def _ler_planilha_b3(file_bytes) -> pd.DataFrame:
     return df[cols_needed]
 
 
-# ==============================================================================
+# =============================================================================
 # Integração do uploader com o banco
-# ==============================================================================
+# =============================================================================
 def importar_e_atualizar(file_bytes):
     """Lê planilha, salva operações novas e recalcula carteira.
 
@@ -222,10 +218,9 @@ def importar_e_atualizar(file_bytes):
     return n_inseridas, n_tickers
 
 
-# ==============================================================================
+# =============================================================================
 # Funções de dados / cotações (mantidas e corrigidas)
-# ==============================================================================
-
+# =============================================================================
 def buscar_dados_yfinance(ticker_b3: str) -> dict:
     """Busca cotações atuais e métricas via Yahoo Finance para ativos da B3."""
     symbol = f"{ticker_b3}.SA" if not ticker_b3.endswith('.SA') else ticker_b3
@@ -252,7 +247,7 @@ def buscar_dados_yfinance(ticker_b3: str) -> dict:
     try:
         dividends = yticker.dividends
         if dividends is not None and not dividends.empty and preco_atual and preco_atual > 0:
-            um_ano_atras = pd.Timestamp.now(tz=dividends.index.tz) - pd.Timedelta(days=365)
+            um_ano_atras = pd.Timestamp.now() - pd.Timedelta(days=365)
             divs_12m = dividends[dividends.index >= um_ano_atras].sum()
             dy = (divs_12m / preco_atual) * 100
     except Exception:
@@ -261,7 +256,11 @@ def buscar_dados_yfinance(ticker_b3: str) -> dict:
     if dy is None or dy == 0:
         dy_raw = info.get('dividendYield') or info.get('trailingAnnualDividendYield')
         if dy_raw is not None:
-            dy = dy_raw * 100 if dy_raw < 1 else dy_raw
+            try:
+                # dy_raw pode já estar em % (5.0) ou decimal (0.05)
+                dy = float(dy_raw) * 100 if float(dy_raw) < 1 else float(dy_raw)
+            except Exception:
+                dy = None
 
     return {
         'ticker': ticker_b3,
@@ -294,10 +293,12 @@ def buscar_fechamentos_14_pregoes(tickers_b3: tuple) -> dict:
     if historico.empty:
         return {}
 
+    # historico pode ter colunas MultiIndex (Close, Ticker) ou single-index; tenta isolar fechamentos
     fechamentos = historico['Close'] if 'Close' in historico else historico
 
     resultado = {}
     for ticker, simbolo in zip(tickers_b3, simbolos):
+        # quando fechamentos tem colunas com nome do símbolo
         if simbolo in fechamentos.columns:
             serie = fechamentos[simbolo].dropna().tail(14)
             if not serie.empty:
@@ -305,9 +306,9 @@ def buscar_fechamentos_14_pregoes(tickers_b3: tuple) -> dict:
     return resultado
 
 
-# ==============================================================================
+# =============================================================================
 # RENDERIZAÇÃO DA INTERFACE (mantida)
-# ==============================================================================
+# =============================================================================
 st.title('📊 Dashboard da Carteira B3')
 st.markdown('Análise consolidada dos extratos oficiais de Movimentações e Negociações da B3.')
 
@@ -358,6 +359,11 @@ else:
         data_acq = row.get('data_primeira_compra')
 
         preco_atual = dados.get('preco_atual') or pm or 0
+        try:
+            preco_atual = float(preco_atual or 0)
+        except Exception:
+            preco_atual = pm or 0
+
         val_atualizado = qtd * (preco_atual or 0)
 
         lucro_prejuizo = val_atualizado - custo_total
@@ -542,7 +548,8 @@ else:
 
     # Alinhamento à direita para todas as colunas exceto Ticker
     right_align_cols = [c for c in df_display.columns if c not in ['Ticker']]
-    styler = styler.set_properties(**{'text-align': 'right'}, subset=right_align_cols)
+    if right_align_cols:
+        styler = styler.set_properties(**{'text-align': 'right'}, subset=right_align_cols)
 
     # Aplicar destaque vermelho e negrito para Ticker e DY das linhas marcadas
     def highlight_rows(x):
@@ -562,6 +569,7 @@ else:
 
     # Exibe a tabela estilizada
     st.subheader('Tabela Detalhada')
-    st.dataframe(styler, use_container_width=True, height=600)
+    # Renderiza o Styler como HTML para preservar estilos customizados
+    st.markdown(styler.to_html(), unsafe_allow_html=True)
 
 # fim do app
