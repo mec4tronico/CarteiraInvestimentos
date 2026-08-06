@@ -385,6 +385,23 @@ else:
 
     df_base = pd.DataFrame(dados_completos)
 
+    # Exibição de métricas resumidas
+    st.subheader('Resumo da Carteira')
+    total_patrimonio = df_base['Valor Atualizado (R$)'].sum()
+    total_investido = df_base['Custo Total Investido (R$)'].sum()
+    total_lucro = df_base['Lucro/Prejuízo (R$)'].sum()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric('Patrimônio Atual', f'R$ {total_patrimonio:,.2f}')
+    c2.metric('Total Investido', f'R$ {total_investido:,.2f}')
+    c3.metric('Lucro / Prejuízo', f'R$ {total_lucro:,.2f}')
+
+    # Gráfico: patrimônio por ativo (mantém visual semelhante ao original)
+    st.subheader('Patrimônio por Ativo')
+    fig = px.bar(df_base.sort_values(by='Valor Atualizado (R$)', ascending=False),
+                 x='Ticker', y='Valor Atualizado (R$)', color='Tipo', title='<b>Patrimônio por Ativo</b>')
+    st.plotly_chart(fig, use_container_width=True)
+
     # Limitar colunas exibidas até 'Rentabilidade vs CDI (%)' conforme solicitado
     display_cols = ['Ticker', 'Tipo', 'DY 12m (%)', 'Valor Atualizado (R$)', 'Lucro/Prejuízo (R$)', 'Rentabilidade (%)', 'Diferença vs. CDI (R$)', 'Rentabilidade vs CDI (%)']
     df_display = df_base[display_cols].copy()
