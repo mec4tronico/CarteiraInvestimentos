@@ -89,6 +89,14 @@ def classificar_tipo_ativo(produto, ticker) -> str:
     return "Ação"
 
 
+def _ensure_series(df: pd.DataFrame, col: str, default=None) -> pd.Series:
+    """Garante que exista uma Series para a coluna (fallback com valores default)."""
+    if col in df.columns:
+        return df[col]
+    # Se df estiver vazio, retorna Series vazia com mesmo index
+    return pd.Series([default] * len(df), index=df.index)
+
+
 # ==============================================================================
 # Leitura e normalização da planilha B3
 # ==============================================================================
@@ -100,7 +108,10 @@ def _ler_planilha_b3(file_bytes) -> pd.DataFrame:
     - Data_dt (datetime), Ticker, tipo_ativo, Movimentação, Entrada/Saída,
       Quantidade_num, Preco_num, Valor_num, numero_operacao, corretora
     """
-    df = pd.read_excel(file_bytes)
+    try:
+        df = pd.read_excel(file_bytes)
+    except Exception as e:
+        raise ValueError(f"Falha ao ler arquivo Excel: {e}")
 
     # Detecta se é o relatório "Negociações" (nomes mais longos)
     colunas_negociacoes = {
@@ -128,21 +139,38 @@ def _ler_planilha_b3(file_bytes) -> pd.DataFrame:
         # Extrai ticker do campo Produto (formato "TICKER - ...")
         df['Ticker'] = df['Produto'].astype(str).str.split('-').str[0].str.strip().str.upper()
 
-    # normalizações e mapeamentos
-    df['Data_dt'] = pd.to_datetime(df['Data'], dayfirst=True, errors='coerce')
-    df['Quantidade_num'] = df['Quantidade'].apply(limpar_valor_numerico)
-    df['Valor_num'] = df['Valor da Operação'].apply(limpar_valor_numerico)
-    df['Preco_num'] = df.get('Preço unitário', 0).apply(limpar_valor_numerico) if 'Preço unitário' in df.columns else df['Valor_num'] / df['Quantidade_num'].replace(0, np.nan)
+    # normalizações e mapeamentos defensivos (garantir Series para cada coluna)
+    df['Data_dt'] = pd.to_datetime(_ensure_series(df, 'Data'), dayfirst=True, errors='coerce')
+
+    # Quantidade e Valor
+    df['Quantidade_num'] = _ensure_series(df, 'Quantidade').apply(limpar_valor_numerico)
+    df['Valor_num'] = _ensure_series(df, 'Valor da Operação').apply(limpar_valor_numerico)
+
+    # Preço unitário: preferir coluna explícita, senão calcular como Valor / Quantidade
+    if 'Preço unitário' in df.columns:
+        df['Preco_num'] = df['Preço unitário'].apply(limpar_valor_numerico)
+    else:
+        # evita divisão por zero
+        with np.errstate(divide='ignore', invalid='ignore'):
+            df['Preco_num'] = (df['Valor_num'] / df['Quantidade_num'].replace(0, np.nan)).fillna(0.0)
 
     # Aplica map de tickers antigos
     df['Ticker'] = df['Ticker'].replace(TICKER_MAP)
 
-    # Preenche colunas opcionais esperadas
-    df['tipo_ativo'] = df.get('Produto', df['Ticker']).apply(lambda x: classificar_tipo_ativo(x, x))
-    df['Movimentação'] = df['Movimentação'].astype(str)
-    df['Entrada/Saída'] = df.get('Entrada/Saída', '').astype(str)
-    df['numero_operacao'] = df.get('numero_operacao', '').astype(str)
-    df['corretora'] = df.get('corretora', '').astype(str)
+    # Produto / tipo_ativo: usar Produto quando disponível senão fallback para Ticker
+    prod_series = _ensure_series(df, 'Produto', default='')
+    prod_series = prod_series.astype(str) if not prod_series.empty else prod_series
+    df['tipo_ativo'] = prod_series.apply(lambda x: classificar_tipo_ativo(x, x)) if not prod_series.empty else df['Ticker'].apply(lambda x: classificar_tipo_ativo(x, x))
+
+    # Movimentação e Entrada/Saída como strings
+    mov = _ensure_series(df, 'Movimentação', default='')
+    ent = _ensure_series(df, 'Entrada/Saída', default='')
+    df['Movimentação'] = mov.astype(str)
+    df['Entrada/Saída'] = ent.astype(str)
+
+    # Colunas opcionais
+    df['numero_operacao'] = _ensure_series(df, 'numero_operacao', default='').astype(str)
+    df['corretora'] = _ensure_series(df, 'corretora', default='').astype(str)
 
     # Ordena cronologicamente
     df = df.sort_values(by='Data_dt', ascending=True)
@@ -151,7 +179,7 @@ def _ler_planilha_b3(file_bytes) -> pd.DataFrame:
     cols_needed = ['Data_dt', 'Ticker', 'tipo_ativo', 'Movimentação', 'Entrada/Saída', 'Quantidade_num', 'Preco_num', 'Valor_num', 'numero_operacao', 'corretora']
     for c in cols_needed:
         if c not in df.columns:
-            df[c] = '' if df.empty else None
+            df[c] = pd.Series([None] * len(df), index=df.index)
 
     return df[cols_needed]
 
@@ -168,6 +196,13 @@ def importar_e_atualizar(file_bytes):
         df_ops = _ler_planilha_b3(file_bytes)
     except Exception as e:
         st.error(f"Erro ao ler a planilha: {e}")
+        # log de colunas e tipos para ajudar debugging
+        try:
+            # tenta abrir com pandas para mostrar colunas se possível
+            df_tmp = pd.read_excel(file_bytes)
+            st.error(f"Colunas detectadas no arquivo: {list(df_tmp.columns)}")
+        except Exception:
+            pass
         return 0, 0
 
     # Insere operações (salvar_operacoes faz deduplicação por hash)
