@@ -317,10 +317,10 @@ arquivo_upload = st.sidebar.file_uploader(
     type=['xlsx']
 )
 
-# Tetos para destaque (mantidos)
+# Tetos para destaque (mantidos) - valores padrões atualizados conforme solicitado
 st.sidebar.header('🔴 Tetos para Destaque em Vermelho')
-teto_vermelho_acoes = st.sidebar.number_input('Teto para Ações (R$)', value=0.0, step=1000.0, format='%.2f')
-teto_vermelho_fiis = st.sidebar.number_input('Teto para FIIs (R$)', value=0.0, format='%.2f')
+teto_vermelho_acoes = st.sidebar.number_input('Teto para Ações (R$)', value=50000.0, step=1000.0, format='%.2f')
+teto_vermelho_fiis = st.sidebar.number_input('Teto para FIIs (R$)', value=38000.0, format='%.2f')
 
 # Se usuário enviar arquivo -> importar e recarregar
 if arquivo_upload is not None:
@@ -385,31 +385,117 @@ else:
 
     df_base = pd.DataFrame(dados_completos)
 
-    # Exibição de métricas resumidas
-    st.subheader('Resumo da Carteira')
-    total_patrimonio = df_base['Valor Atualizado (R$)'].sum()
-    total_investido = df_base['Custo Total Investido (R$)'].sum()
-    total_lucro = df_base['Lucro/Prejuízo (R$)'].sum()
+    # Limitar colunas exibidas até 'Rentabilidade vs CDI (%)' conforme solicitado
+    display_cols = ['Ticker', 'Tipo', 'DY 12m (%)', 'Valor Atualizado (R$)', 'Lucro/Prejuízo (R$)', 'Rentabilidade (%)', 'Diferença vs. CDI (R$)', 'Rentabilidade vs CDI (%)']
+    df_display = df_base[display_cols].copy()
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric('Patrimônio Atual', f'R$ {total_patrimonio:,.2f}')
-    c2.metric('Total Investido', f'R$ {total_investido:,.2f}')
-    c3.metric('Lucro / Prejuízo', f'R$ {total_lucro:,.2f}')
+    # Formatação: porcentagens arredondadas para 2 casas e alinhamento à direita
+    pct_cols = ['DY 12m (%)', 'Rentabilidade (%)', 'Rentabilidade vs CDI (%)']
+    for c in pct_cols:
+        if c in df_display.columns:
+            df_display[c] = pd.to_numeric(df_display[c], errors='coerce').round(2)
 
-    # Gráfico: patrimônio por ativo (mantém visual semelhante ao original)
-    st.subheader('Patrimônio por Ativo')
-    fig = px.bar(df_base.sort_values(by='Valor Atualizado (R$)', ascending=False),
-                 x='Ticker', y='Valor Atualizado (R$)', color='Tipo', title='<b>Patrimônio por Ativo</b>')
-    st.plotly_chart(fig, use_container_width=True)
+    # Formatação: valores em R$
+    currency_cols = ['Valor Atualizado (R$)', 'Lucro/Prejuízo (R$)', 'Diferença vs. CDI (R$)']
+    for c in currency_cols:
+        if c in df_display.columns:
+            df_display[c] = pd.to_numeric(df_display[c], errors='coerce').fillna(0.0)
 
-    # Tabela detalhada (ordenada por DY decrescente como no original)
+    # ======================================================================
+    # Lógica de marcação em vermelho por DY acumulado até o teto (ações e FIIs)
+    # ======================================================================
+    tickers_to_mark = set()
+
+    # Helper: processa um grupo (DataFrame) e marca tickers com DY baixo até atingir o teto
+    def marcar_ate_teto(df_group, teto_valor):
+        acumulado = 0.0
+        # Ordena por DY asc (menor primeiro). NaNs vão para o final.
+        df_sorted = df_group.sort_values(by='DY 12m (%)', ascending=True, na_position='last')
+        for _, r in df_sorted.iterrows():
+            ticker = r['Ticker']
+            valor = float(r.get('Valor Atualizado (R$)') or 0.0)
+            if acumulado < teto_valor:
+                acumulado += valor
+                tickers_to_mark.add(ticker)
+                if acumulado >= teto_valor:
+                    # atingiu ou passou do teto: interrompe a inclusão
+                    break
+            else:
+                break
+
+    # Separa em Ações (treat Unit as action) e FIIs
+    df_actions = df_display[df_display['Tipo'].astype(str).str.upper().str.contains('FII') == False].copy()
+    df_fiis = df_display[df_display['Tipo'].astype(str).str.upper().str.contains('FII')].copy()
+
+    try:
+        teto_acoes = float(teto_vermelho_acoes or 0)
+    except Exception:
+        teto_acoes = 0.0
+    try:
+        teto_fiis = float(teto_vermelho_fiis or 0)
+    except Exception:
+        teto_fiis = 0.0
+
+    marcar_ate_teto(df_actions, teto_acoes)
+    marcar_ate_teto(df_fiis, teto_fiis)
+
+    # ======================================================================
+    # Estilização final com pandas Styler
+    # - porcentagens com 2 casas e '%' e alinhadas à direita
+    # - valores em R$ com "R$ " prefixo e alinhados à direita
+    # - tickers marcados: coluna Ticker e DY em vermelho e negrito
+    # ======================================================================
+    styler = df_display.style
+
+    # Formatação numérica
+    def fmt_currency(x):
+        try:
+            if pd.isna(x):
+                return '-'
+            return f"R$ {x:,.2f}"
+        except Exception:
+            return x
+
+    def fmt_pct(x):
+        try:
+            if pd.isna(x):
+                return '-'
+            return f"{x:.2f}%"
+        except Exception:
+            return x
+
+    fmt_map = {}
+    for c in currency_cols:
+        if c in df_display.columns:
+            fmt_map[c] = fmt_currency
+    for c in pct_cols:
+        if c in df_display.columns:
+            fmt_map[c] = fmt_pct
+
+    styler = styler.format(fmt_map, na_rep='-')
+
+    # Alinhamento à direita para todas as colunas exceto Ticker e Tipo
+    right_align_cols = [c for c in df_display.columns if c not in ['Ticker', 'Tipo']]
+    styler = styler.set_properties(**{'text-align': 'right'}, subset=right_align_cols)
+
+    # Aplicar destaque vermelho e negrito para Ticker e DY das linhas marcadas
+    def highlight_rows(x):
+        # x é o DataFrame de valores; vamos retornar DataFrame de strings de estilo
+        df_styles = pd.DataFrame('', index=x.index, columns=x.columns)
+        for idx in x.index:
+            ticker = x.at[idx, 'Ticker']
+            if ticker in tickers_to_mark:
+                # aplicar cor vermelha e negrito na coluna Ticker e DY
+                if 'Ticker' in df_styles.columns:
+                    df_styles.at[idx, 'Ticker'] = 'color: #b91c1c; font-weight: bold;'
+                if 'DY 12m (%)' in df_styles.columns:
+                    df_styles.at[idx, 'DY 12m (%)'] = 'color: #b91c1c; font-weight: bold;'
+        return df_styles
+
+    styler = styler.apply(highlight_rows, axis=None)
+
+    # Exibe a tabela estilizada
     st.subheader('Tabela Detalhada')
-    if 'DY 12m (%)' in df_base.columns:
-        df_tabela = df_base.sort_values(by='DY 12m (%)', ascending=False).reset_index(drop=True)
-    else:
-        df_tabela = df_base.copy()
-
-    # Formatação simples para exibição; não alteramos colunas disponíveis
-    st.dataframe(df_tabela, use_container_width=True, height=600)
+    st.dataframe(styler, use_container_width=True, height=600)
 
 # fim do app
